@@ -1,0 +1,9 @@
+香港,0,0,5000,ns,hoeng1 gong2,香港,香港,Hong Kong
+香港,0,0,6000,ns,gong2 hoeng1,香港,香港,Hong Kong again (duplicate surface - first row wins)
+今日新聞,0,0,6000,n,gam1 jat6 san1 man4,今日新聞,今日新闻,news today
+今日,0,0,5000,t,gam1 jat6,今日,今日,today
+島,0,0,6000,n,dou2,島,岛,island
+茶餐廳,0,0,6000,n,,茶餐廳,茶餐厅,reading absent (empty skips)
+茶餐廳,0,0,6500,n,*,茶餐廳,茶餐厅,reading absent (star skips)
+茶餐廳,0,0,5500,n,caa1 caan1 teng1,茶餐廳,茶餐厅,cha chaan teng
+旺角,0,0,5500,ns,wong6 gok3,旺角,旺角,Mong Kok (absent from the primary)

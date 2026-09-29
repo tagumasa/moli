@@ -1,0 +1,32 @@
+tmp/
+
+# Downloaded source dictionaries (fixtures sample from these; see
+# tests/fixtures/README.md)
+dict/
+
+# Aubade tracker data (incidents/sprints store)
+.aubade/
+
+*.exe
+*.dll
+*.so
+*.dylib
+*.pdb
+*.a
+*.log
+
+# Core dumps (a crashed test drops them at the root)
+core
+core.*
+
+# Odin build/test binaries (odin test drops them in the repo root)
+/*.bin
+
+# Python SDK build/test artifacts (the built .so files are covered by
+# the global *.so rule above)
+.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+build/
+dist/

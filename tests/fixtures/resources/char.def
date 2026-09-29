@@ -1,0 +1,10 @@
+# minimal char.def exercising every accepted record form.
+# Ranges deliberately sit in gaps of the built-in table so the merged
+# table stays non-overlapping.
+DEFAULT 0 1 0
+KANJI 0 0 2
+KATAKANA 1 1 2
+0x3001 SYMBOL  # single-codepoint form, trailing comment
+0x2E80..0x2EF0 KANJI
+0x31F0..0x31FF KATAKANA
+0xFF61..0xFF65 SYMBOL

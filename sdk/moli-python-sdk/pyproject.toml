@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "moli"
+version = "0.1.0"
+description = "Morphological analysis SDK for Python, over the libmoli C ABI"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+license = { text = "MIT" }
+
+# The runtime is stdlib-only plus the two compiled artefacts
+# (_native extension + lib/libmoli), both built by the repository's
+# just recipes; wheels ship at distribution time.
+[tool.setuptools]
+packages = ["moli"]
+package-dir = { "" = "src" }
