@@ -32,7 +32,7 @@ What actually happened.
 ## Environment
 
 - OS: [e.g., Linux, macOS, Windows]
-- Odin version: [e.g., dev-2026-09-nightly:a2fb372]
+- Odin version: [e.g., dev-2026-10-nightly:84bc3fc]
 - moli version: [commit or tag; via the Python SDK, `moli.native_version()`]
 - Interface: [Odin library, C ABI, Python SDK]
 

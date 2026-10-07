@@ -727,21 +727,26 @@ matrix_row_base :: #force_inline proc(m: ^Connection_Matrix, right_id: i16) -> ^
 // adds its own accumulator on top. i64 addition is associative, so the
 // grouping change against the former inline sums is bit-identical.
 edge_cost :: #force_inline proc(m: ^Connection_Matrix, row_base: ^i16, succ: ^Successors, sj: int, unk_bias: i32, unk_per_rune: i32) -> i64 {
-	edge := CONNECTION_DEFAULT_COST
-	if row_base != nil {
-		r := int(succ.left_id[sj])
-		if r >= 0 && r < m.n_right {
-			edge = (intrinsics.ptr_offset(row_base, r))^
+	// sj is a lattice index by the successor-bucket invariant
+	// (lattice_successor_index), so the packed-array reads carry no
+	// bounds checks.
+	#no_bounds_check {
+		edge := CONNECTION_DEFAULT_COST
+		if row_base != nil {
+			r := int(succ.left_id[sj])
+			if r >= 0 && r < m.n_right {
+				edge = (intrinsics.ptr_offset(row_base, r))^
+			}
 		}
-	}
-	cost := i64(edge) + i64(succ.cost[sj])
-	if succ.unknown[sj] {
-		cost += i64(unk_bias)
-		if unk_per_rune != 0 {
-			cost += i64(unk_per_rune) * i64(succ.unk_runes[sj])
+		cost := i64(edge) + i64(succ.cost[sj])
+		if succ.unknown[sj] {
+			cost += i64(unk_bias)
+			if unk_per_rune != 0 {
+				cost += i64(unk_per_rune) * i64(succ.unk_runes[sj])
+			}
 		}
+		return cost
 	}
-	return cost
 }
 
 viterbi_best_path :: proc(a: ^Analyzer, lattice: []Lattice_Node, text: string, unk_bias: i32, unk_per_rune: i32, arena_allocator: mem.Allocator) -> ([]int, Tokenize_Err) {
@@ -785,23 +790,28 @@ viterbi_best_path :: proc(a: ^Analyzer, lattice: []Lattice_Node, text: string, u
 	// successor; row_base is dereferenced only through it.
 	m := &a.conn_matrix
 	for i := 0; i < n_nodes; i += 1 {
-		if dp[i] == DP_UNREACHABLE { continue }
-		n := &lattice[i]
+		// Every index here is a lattice index - i by the loop bound,
+		// sj by the successor-bucket invariant, n.end by the walk
+		// table - so the body carries no bounds checks.
+		#no_bounds_check {
+			if dp[i] == DP_UNREACHABLE { continue }
+			n := &lattice[i]
 
-		row_base := matrix_row_base(m, n.right_id)
+			row_base := matrix_row_base(m, n.right_id)
 
-		succ_lo := 0
-		succ_hi := 0
-		if n.end <= text_len {
-			succ_lo = offsets[n.end]
-			succ_hi = offsets[n.end + 1]
-		}
-		for sj in succ_lo ..< succ_hi {
-			if !edge_target_ok(i, sj) { continue }
-			cand := dp[i] + edge_cost(m, row_base, &succ, sj, unk_bias, unk_per_rune)
-			if cand < dp[sj] {
-				dp[sj] = cand
-				prev[sj] = i
+			succ_lo := 0
+			succ_hi := 0
+			if n.end <= text_len {
+				succ_lo = offsets[n.end]
+				succ_hi = offsets[n.end + 1]
+			}
+			for sj in succ_lo ..< succ_hi {
+				if !edge_target_ok(i, sj) { continue }
+				cand := dp[i] + edge_cost(m, row_base, &succ, sj, unk_bias, unk_per_rune)
+				if cand < dp[sj] {
+					dp[sj] = cand
+					prev[sj] = i
+				}
 			}
 		}
 	}

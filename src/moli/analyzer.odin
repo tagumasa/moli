@@ -40,6 +40,13 @@ Analyzer :: struct {
 	unknown_fallback_pos:  string,          // per-language fallback POS, cloned at load
 	skipped_resources: [dynamic]string, // optional resources that were absent
 
+	// intern holds the canonical copies of the entries' repeated field
+	// values (the importer's joined POS strings and "*" sentinels);
+	// rows borrow them under the interned mask, and teardown releases
+	// each canonical once, here. Empty for snapshot restores, whose
+	// rows view the image instead.
+	intern: map[string]string,
+
 	// entries_hash caches entries_fingerprint's value, stamped at the
 	// end of every construction path (load, snapshot restore, the
 	// add_user_entries swap window). stats is the only reader; that
@@ -130,16 +137,22 @@ drain_wait_sleep :: proc(_: ^Analyzer, _: int) {
 // appends entries in file order, so the entry id — the cedar's chain
 // currency — is the index into Analyzer.entries.
 //
-// String ownership is per row: strings_owned marks rows whose five
-// string fields were cloned into the analyzer allocator (a CSV import
-// or an add_user_entries merge), so teardown deletes them; a snapshot
-// restore leaves it false because its strings are views into the
-// retained image, released with the image instead. The flag travels
+// String ownership is per row and per field. strings_owned marks rows
+// whose five string fields were cloned into the analyzer allocator (a
+// CSV import or an add_user_entries merge), so teardown deletes them;
+// a snapshot restore leaves it false because its strings are views
+// into the retained image, released with the image instead. Within an
+// owned row, the interned mask marks the repeatable fields
+// (joined_pos and the "*" sentinels) that borrow the importer's
+// intern table instead of owning a private clone - the table owns the
+// one canonical copy. A path that replaces such a field (lemma
+// normalization, the jyutping donor) clears its bit and owns the
+// replacement. The flags travel
 // with the row through copies, which is what makes a merged entry
 // list's ownership independent of where a surface sort places each
 // row. cost is saturated-clamped into i16 on load: values beyond the
-// range clamp to the range ends, preserving cost ordering. surface and
-// lemma may be empty; "*" is preserved in storage (the surface
+// range clamp to the range ends, preserving cost ordering. surface
+// and lemma may be empty; "*" is preserved in storage (the surface
 // fallback is a Morpheme rule, not an entry rule).
 Dictionary_Entry :: struct {
 	surface:          string,
@@ -152,7 +165,20 @@ Dictionary_Entry :: struct {
 	reading_jyutping: string,           // jyutping (ZH-HK) or "*"
 	extra:            [dynamic]string,  // schema-specific tail columns
 	strings_owned:    bool,             // five string fields cloned into allocator (see above)
+	interned:         u8,               // borrowed-field mask (see above); surface never borrows
 }
+
+// The interned mask's field bits. Surface never interns (surfaces are
+// near-unique); the high-cardinality real readings and lemmas do not
+// either - interning them would trade their clone rows for a
+// comparable mass of map entries. What borrows is what repeats across
+// the whole dictionary: the joined POS strings (unidic carries 1,574
+// distinct over 756,463 rows) and the "*" sentinels (unidic's reading
+// column is "*" on every row).
+INTERN_JOINED_POS       :: u8(1 << 0)
+INTERN_LEMMA            :: u8(1 << 1)
+INTERN_READING          :: u8(1 << 2)
+INTERN_READING_JYUTPING :: u8(1 << 3)
 
 // entry_string_fields answers the entry's five owned string fields as
 // one array - the single statement of the field set dictionary_entry_destroy
@@ -164,13 +190,16 @@ entry_string_fields :: #force_inline proc(e: ^Dictionary_Entry) -> [5]string {
 	return [5]string{e.surface, e.joined_pos, e.lemma, e.reading, e.reading_jyutping}
 }
 
-// dictionary_entry_destroy releases every field of one entry through
-// the allocator the strings were cloned into. extra carries its own
-// allocator and is deleted bare.
+// dictionary_entry_destroy releases every owned field of one entry
+// through the allocator the strings were cloned into; fields under
+// the interned mask are the intern table's, released with it. extra
+// carries its own allocator and is deleted bare.
 dictionary_entry_destroy :: proc(e: ^Dictionary_Entry, allocator: mem.Allocator) {
-	for s in entry_string_fields(e) {
-		delete(s, allocator)
-	}
+	delete(e.surface, allocator)
+	if e.interned & INTERN_JOINED_POS == 0 { delete(e.joined_pos, allocator) }
+	if e.interned & INTERN_LEMMA == 0 { delete(e.lemma, allocator) }
+	if e.interned & INTERN_READING == 0 { delete(e.reading, allocator) }
+	if e.interned & INTERN_READING_JYUTPING == 0 { delete(e.reading_jyutping, allocator) }
 	for s in e.extra {
 		delete(s, allocator)
 	}

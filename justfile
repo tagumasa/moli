@@ -69,16 +69,13 @@ sdk-venv:
     python3 -m venv {{ SDK }}/.venv
     {{ SDK }}/.venv/bin/pip install pytest
 
-# Build libmoli.so (the C ABI over the analysis library). odin's own
-# -build-mode:shared link is broken on the pinned toolchain
-# (dev-2026-09): it passes the init symbol to the linker wrapped in
-# literal single quotes (-Wl,-init,'__odin_entry_point'), which the
-# macOS ld rejects as an undefined symbol while GNU ld silently
-# ignores it - so odin's shared build passes on Linux and cannot link
-# on macOS at all. Building the archive skips that link path entirely
-# (plain ar), and the final link below is ours; the runtime's
-# load-time init rides the objects' .init_array / __mod_init_func
-# sections either way, not -init.
+# Build libmoli.so (the C ABI over the analysis library). The link is
+# ours, not odin's -build-mode:shared: the manual link pins the macOS
+# install_name/@rpath the extension loads through and keeps the
+# hardening flags explicit per platform. Building the archive skips
+# odin's link path entirely (plain ar); the runtime's load-time init
+# rides the objects' .init_array / __mod_init_func sections either
+# way, not -init.
 sdk-lib:
     #!/usr/bin/env bash
     set -euo pipefail

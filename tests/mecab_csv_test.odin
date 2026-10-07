@@ -1,8 +1,9 @@
 // MeCab CSV coverage: schema detection, the quoting-aware field
 // parser (embedded commas, doubled quotes, trailing quoted fields),
-// per-schema parse, cost saturation, the empty/BOM/malformed file
-// gauntlet at the load boundary, and the allocation-failure legs
-// (parse_entry's clone ladder, the entries append at a growth point).
+// per-schema parse, integer-parse saturation (the i16 clamp and the
+// decimal parse's i64 edges), the empty/BOM/malformed file gauntlet
+// at the load boundary, and the allocation-failure legs (parse_entry's
+// clone ladder, the entries append at a growth point).
 package tests
 
 import "core:mem"
@@ -12,6 +13,18 @@ import "moli:moli"
 // The reference ipadic row the schema-detection and parse tests share
 // (13 columns; the real first row of tests/fixtures/ipadic_sample.csv).
 ipadic_reference_row :: "さくら,0,0,5500,名詞,一般,*,*,*,*,さくら,サクラ,サクラ"
+
+// parse_intern builds the intern table parse_entry borrows its
+// repeatable fields through; the caller releases it with
+// intern_table_release.
+parse_intern :: proc(t: ^testing.T, allocator: mem.Allocator) -> (intern: map[string]string, ok: bool) {
+	table, err := moli.intern_table_init(allocator)
+	if err != nil {
+		testing.expectf(t, false, "intern table init: %v", err)
+		return nil, false
+	}
+	return table, true
+}
 
 @(test)
 csv_schema_detection_test :: proc(t: ^testing.T) {
@@ -130,12 +143,15 @@ field_buffer_growth_oom_test :: proc(t: ^testing.T) {
 	defer delete(fields_buf)
 	unquoted_buf := make([dynamic]u8, 0, 64, allocator)
 	defer delete(unquoted_buf)
+	intern, iok := parse_intern(t, context.allocator)
+	if !iok { return }
+	defer moli.intern_table_release(&intern, context.allocator)
 
 	// A 79-byte quoted field must grow the unquoted buffer; the
 	// no-resize allocator fails exactly that growth.
 	quoted :: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()_+abcd"
 	long_line := "\"" + quoted + "\",0,0,0,名詞,一般,*,*,*,*,x,y,z"
-	_, qerr := moli.parse_entry(.Ipadic, transmute([]byte)long_line, 1, 13, context.allocator, &fields_buf, &unquoted_buf)
+	_, qerr := moli.parse_entry(.Ipadic, transmute([]byte)long_line, 1, 13, context.allocator, &fields_buf, &unquoted_buf, &intern)
 	testing.expectf(t, qerr == moli.Load_Fault.OutOfMemory,
 		"quoted-field buffer growth must surface as .OutOfMemory, got %v", qerr)
 
@@ -151,7 +167,7 @@ field_buffer_growth_oom_test :: proc(t: ^testing.T) {
 	defer delete(fb)
 	ub := make([dynamic]u8, 0, 16, context.allocator)
 	defer delete(ub)
-	e, perr := moli.parse_entry(.Ipadic, transmute([]byte)long_line, 1, 13, context.allocator, &fb, &ub)
+	e, perr := moli.parse_entry(.Ipadic, transmute([]byte)long_line, 1, 13, context.allocator, &fb, &ub, &intern)
 	if perr != nil {
 		testing.expectf(t, false, "long quoted field must parse: %v", perr)
 		return
@@ -262,10 +278,13 @@ csv_per_schema_parse_test :: proc(t: ^testing.T) {
 	unquoted_buf := make([dynamic]u8, 0, 16, scratch_allocator)
 	// parse_entry's clone/destroy pairing rides the tracking allocator.
 	allocator := context.allocator
+	intern, iok := parse_intern(t, allocator)
+	if !iok { return }
+	defer moli.intern_table_release(&intern, allocator)
 
 	// Ipadic 13-column row (the shared reference row).
 	line := ipadic_reference_row
-	e, err := moli.parse_entry(.Ipadic, transmute([]byte)line, 1, 13, allocator, &fields_buf, &unquoted_buf)
+	e, err := moli.parse_entry(.Ipadic, transmute([]byte)line, 1, 13, allocator, &fields_buf, &unquoted_buf, &intern)
 	if err != nil {
 		testing.expectf(t, false, "ipadic parse: %v", err)
 		return
@@ -285,7 +304,7 @@ csv_per_schema_parse_test :: proc(t: ^testing.T) {
 	// MeCabJieba 9-column row with a quoted definition tail: the lemma
 	// is a separate clone of the surface value.
 	jieba_line := "一乾二淨,0,0,763,i,yi1 gan1 er4 jing4,一乾二淨,一干二净,\"thoroughly, completely\""
-	e, err = moli.parse_entry(.MeCabJieba, transmute([]byte)jieba_line, 1, 9, allocator, &fields_buf, &unquoted_buf)
+	e, err = moli.parse_entry(.MeCabJieba, transmute([]byte)jieba_line, 1, 9, allocator, &fields_buf, &unquoted_buf, &intern)
 	if err != nil {
 		testing.expectf(t, false, "jieba parse: %v", err)
 		return
@@ -310,7 +329,7 @@ csv_per_schema_parse_test :: proc(t: ^testing.T) {
 	// Unidic 21-column row (unidic-mecab 2.1.2 layout): POS cols 4-9,
 	// lemma col 11, pronunciation col 13, cols 17+ extra.
 	unidic_line := "ぬかそっ,1323,1323,12837,動詞,一般,*,*,五段-サ行,意志推量形,ヌカス,吐かす,ぬかそっ,ヌカソッ,ぬかす,ヌカス,和,*,*,*,*"
-	e, err = moli.parse_entry(.Unidic, transmute([]byte)unidic_line, 1, 21, allocator, &fields_buf, &unquoted_buf)
+	e, err = moli.parse_entry(.Unidic, transmute([]byte)unidic_line, 1, 21, allocator, &fields_buf, &unquoted_buf, &intern)
 	if err != nil {
 		testing.expectf(t, false, "unidic parse: %v", err)
 		return
@@ -334,7 +353,7 @@ csv_per_schema_parse_test :: proc(t: ^testing.T) {
 
 	// Column-count mismatch answers Schema_Mismatch_Error.
 	bad_line := "さくら,0,0,5500,名詞,一般,*,*,*,*,さくら,サクラ"
-	_, err = moli.parse_entry(.Ipadic, transmute([]byte)bad_line, 7, 13, allocator, &fields_buf, &unquoted_buf)
+	_, err = moli.parse_entry(.Ipadic, transmute([]byte)bad_line, 7, 13, allocator, &fields_buf, &unquoted_buf, &intern)
 	if err == nil {
 		testing.expectf(t, false, "12-col ipadic line must fail with Schema_Mismatch_Error, got success")
 		return
@@ -352,15 +371,56 @@ csv_per_schema_parse_test :: proc(t: ^testing.T) {
 
 	// An empty surface and non-numeric ids abort the load.
 	empty_surface := ",0,0,5000,名詞,一般,*,*,*,*,x,y,z"
-	if _, err := moli.parse_entry(.Ipadic, transmute([]byte)empty_surface, 1, 13, allocator, &fields_buf, &unquoted_buf); err == nil {
+	if _, err := moli.parse_entry(.Ipadic, transmute([]byte)empty_surface, 1, 13, allocator, &fields_buf, &unquoted_buf, &intern); err == nil {
 		testing.expectf(t, false, "empty surface must fail")
 		return
 	}
 	bad_id := "犬,x,0,5000,名詞,一般,*,*,*,*,犬,イヌ,イヌ"
-	if _, err := moli.parse_entry(.Ipadic, transmute([]byte)bad_id, 1, 13, allocator, &fields_buf, &unquoted_buf); err == nil {
+	if _, err := moli.parse_entry(.Ipadic, transmute([]byte)bad_id, 1, 13, allocator, &fields_buf, &unquoted_buf, &intern); err == nil {
 		testing.expectf(t, false, "non-numeric left id must fail")
 		return
 	}
+}
+
+@(test)
+csv_intern_sharing_test :: proc(t: ^testing.T) {
+	arena: mem.Dynamic_Arena
+	mem.dynamic_arena_init(&arena)
+	defer mem.dynamic_arena_destroy(&arena)
+	scratch_allocator := mem.dynamic_arena_allocator(&arena)
+	fields_buf := make([dynamic]string, 0, 16, scratch_allocator)
+	unquoted_buf := make([dynamic]u8, 0, 16, scratch_allocator)
+	allocator := context.allocator
+	intern, iok := parse_intern(t, allocator)
+	if !iok { return }
+	defer moli.intern_table_release(&intern, allocator)
+
+	// Two rows whose joined POS and "*" sentinels repeat: the second
+	// row borrows the first's canonical backing (one copy per distinct
+	// value), while surfaces stay private per row.
+	line_a := "さくら,0,0,5500,名詞,一般,*,*,*,*,さくら,サクラ,サクラ"
+	line_b := "すずめ,0,0,5500,名詞,一般,*,*,*,*,すずめ,スズメ,スズメ"
+	ea, ea_err := moli.parse_entry(.Ipadic, transmute([]byte)line_a, 1, 13, allocator, &fields_buf, &unquoted_buf, &intern)
+	if ea_err != nil {
+		testing.expectf(t, false, "row a: %v", ea_err)
+		return
+	}
+	eb, eb_err := moli.parse_entry(.Ipadic, transmute([]byte)line_b, 1, 13, allocator, &fields_buf, &unquoted_buf, &intern)
+	if eb_err != nil {
+		moli.dictionary_entry_destroy(&ea, allocator)
+		testing.expectf(t, false, "row b: %v", eb_err)
+		return
+	}
+	shared_pos := raw_data(ea.joined_pos) == raw_data(eb.joined_pos)
+	shared_star := raw_data(ea.reading_jyutping) == raw_data(eb.reading_jyutping)
+	private_surface := raw_data(ea.surface) != raw_data(eb.surface)
+	private_reading := raw_data(ea.reading) != raw_data(eb.reading)
+	moli.dictionary_entry_destroy(&ea, allocator)
+	moli.dictionary_entry_destroy(&eb, allocator)
+	testing.expectf(t, shared_pos, "repeated joined_pos must share the canonical backing")
+	testing.expectf(t, shared_star, "the \"*\" sentinel must share the canonical backing")
+	testing.expectf(t, private_surface, "surfaces stay private per row")
+	testing.expectf(t, private_reading, "distinct readings stay private per row")
 }
 
 @(test)
@@ -384,6 +444,54 @@ csv_cost_saturation_test :: proc(t: ^testing.T) {
 	if _, ok := moli.parse_i16_saturating(""); ok {
 		testing.expectf(t, false, "empty string must not parse")
 		return
+	}
+}
+
+// parse_decimal's value contract at its edges: an optionally signed
+// run of ASCII digits, a magnitude the ladder cannot hold saturates
+// to the i64 ends (the callers' range checks and the i16 clamp own
+// the decisions), and anything else - a radix prefix, an underscore
+// separator, surrounding whitespace, a bare sign - is not a number.
+@(test)
+parse_decimal_edge_test :: proc(t: ^testing.T) {
+	cases := []struct {
+		input:   string,
+		want:    int,
+		want_ok: bool,
+	}{
+		{"", 0, false},
+		{"0", 0, true},
+		{"-0", 0, true},
+		{"+5", 5, true},
+		{"-5", -5, true},
+		{"007", 7, true},
+		{" 5", 0, false},
+		{"5 ", 0, false},
+		{"0x10", 0, false},
+		{"1_0", 0, false},
+		{"9z", 0, false},
+		{"+", 0, false},
+		{"-", 0, false},
+		// Saturation fires on the running digit prefix at
+		// (max(i64)-9)/10: inputs up to max(i64)-8 multiply out
+		// exactly, the window from max(i64)-7 up answers the ends -
+		// at every caller (dimension and id range checks, the i16
+		// clamp) the saturated outcome matches the exact value's.
+		{"9223372036854775798", 9223372036854775798, true},
+		{"9223372036854775800", max(int), true},
+		{"9223372036854775807", max(int), true},
+		{"9223372036854775808", max(int), true},
+		{"99999999999999999999", max(int), true},
+		{"-9223372036854775808", min(int), true},
+		{"-99999999999999999999", min(int), true},
+	}
+	for c in cases {
+		got, ok := moli.parse_decimal(c.input)
+		if ok != c.want_ok || got != c.want {
+			testing.expectf(t, false, "parse_decimal(%q): want (%v, %v), got (%v, %v)",
+				c.input, c.want, c.want_ok, got, ok)
+			return
+		}
 	}
 }
 
@@ -475,6 +583,12 @@ parse_entry_oom_sweep_test :: proc(t: ^testing.T) {
 	defer delete(fields_buf)
 	unquoted_buf := make([dynamic]u8, 0, 64, context.allocator)
 	defer delete(unquoted_buf)
+	// The intern table rides the plain allocator so the sweep starves
+	// only the ladder's clones; borrowed fields skip each iteration's
+	// destroy by mask.
+	intern, iok := parse_intern(t, context.allocator)
+	if !iok { return }
+	defer moli.intern_table_release(&intern, context.allocator)
 
 	line := "犬,1285,1285,5000,名詞,一般,*,*,*,*,犬,イヌ,イヌ"
 	saw_oom := false
@@ -482,7 +596,7 @@ parse_entry_oom_sweep_test :: proc(t: ^testing.T) {
 	for budget in 0 ..< 12 {
 		b := Budget_Allocator{backing = context.allocator, remaining = budget}
 		allocator := mem.Allocator{data = &b, procedure = budget_allocator_proc}
-		e, err := moli.parse_entry(.Ipadic, transmute([]byte)line, 1, 13, allocator, &fields_buf, &unquoted_buf)
+		e, err := moli.parse_entry(.Ipadic, transmute([]byte)line, 1, 13, allocator, &fields_buf, &unquoted_buf, &intern)
 		if err == nil {
 			moli.dictionary_entry_destroy(&e, allocator)
 			parsed = true
@@ -524,6 +638,15 @@ import_append_growth_oom_test :: proc(t: ^testing.T) {
 		testing.expectf(t, false, "init bufs: %v", err)
 		return
 	}
+	// The intern table is part of the importer's initialized state: a
+	// nil map would grow its first insert through the ambient
+	// allocator (the documented nil-collection landmine).
+	intern_table, ierr := moli.intern_table_init(allocator)
+	if ierr != nil {
+		testing.expectf(t, false, "intern init: %v", ierr)
+		return
+	}
+	imp.intern = intern_table
 
 	line1 := "犬,1285,1285,5000,名詞,一般,*,*,*,*,犬,イヌ,イヌ"
 	line2 := "猫,1285,1285,5000,名詞,一般,*,*,*,*,猫,ネコ,ネコ"
@@ -542,6 +665,7 @@ import_append_growth_oom_test :: proc(t: ^testing.T) {
 		moli.dictionary_entry_destroy(&e, allocator)
 	}
 	delete(imp.entries)
+	moli.intern_table_release(&imp.intern, allocator)
 }
 
 // A UTF-8 BOM in front of any optional resource is tolerated: every

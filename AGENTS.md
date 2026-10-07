@@ -105,7 +105,7 @@ just sdk-test    # SDK build, shim ABI tests under the same gate, pytest
   the whole log as binary — hence `-a`. The leak discipline is **zero
   leak lines**, not "fewer than before".
 - The Odin compiler tracks the **latest nightly** (currently
-  `dev-2026-09-nightly:a2fb372`). If a nightly breaks the build, pin
+  `dev-2026-10-nightly:84bc3fc`). If a nightly breaks the build, pin
   the last known-good hash and note it here. This nightly ships no
   `odin fmt` subcommand — there is no formatter step; re-check after
   a compiler update.
@@ -219,7 +219,11 @@ just sdk-test    # SDK build, shim ABI tests under the same gate, pytest
   (`merr` = make, `aerr` = append, `cerr` = clone/copy). Odin rejects
   shadowing and same-scope `:=` redeclaration, so parallel sites in
   one scope take distinct/numbered variants (`merr2`, `merr3`) — that
-  is the idiom, don't collapse them into a single name.
+  is the idiom, don't collapse them into a single name. The same
+  shadowing rule bites named returns: a multi-value assignment inside
+  `proc() -> (table: T, err: E)` must not reuse `table` as its local
+  ("Direct shadowing of the named return value") — bind to a fresh
+  local (`t, merr := make(...)`) and return it.
 - Shim naming map (sdk): wire structs carry the `_FFI` suffix
   (`Morpheme_FFI` ← C `Moli_Morpheme`); the `*_Code` enums are the
   ABI-flattened mirrors of the core `*_Fault` enums (union context
@@ -265,7 +269,7 @@ targets.
 
 # Reference
 
-## Odin language and stdlib (verified on dev-2026-09-nightly:a2fb372)
+## Odin language and stdlib (verified on dev-2026-10-nightly:84bc3fc)
 
 Re-check each item after a compiler update. Items marked fixed below
 are probe-verified gone on dev-2026-09 and kept as history.
@@ -275,7 +279,8 @@ are probe-verified gone on dev-2026-09 and kept as history.
   (the `os.Error` convention) or a nil-able plain union. Typed rune
   constants use the cast form `rune(0x3100)`, not `:: rune = …`.
 - **`union #shared_nil` remains unusable for the enum+struct error
-  shape** (probe-verified on dev-2026-09): plain-struct variants are
+  shape** (probe-verified on dev-2026-09 and dev-2026-10):
+  plain-struct variants are
   rejected outright ("Each variant of a union with #shared_nil must
   have a 'nil' value"); enum variants are accepted but broken at
   runtime — any member assignment (`e = .Bad` or `e = Fault(.Bad)`)
@@ -285,24 +290,37 @@ are probe-verified gone on dev-2026-09 and kept as history.
   enum+struct error shape is a plain `union {Fault, Context}` — nil
   means "no failure", a member value constructs it directly
   (`.Some_Fault`), and a type switch takes it apart.
-- **`matrix` is a keyword** (the SIMD type) — a struct field by that
-  name is a syntax error.
+- **`matrix` and `distinct` are keywords** (the SIMD type; the
+  distinct-type declaration) — a struct field or local by either name
+  is a syntax error, and `distinct` in particular cascades parse
+  errors far from its use site.
 - **Constant-data access**: the dev-2026-08 miscompilations (nested
   inline literals yielding empty strings; struct copies out of
   constant data arriving with scrambled slice fields) are gone on
   dev-2026-09 — copies and for-bindings are sound. What stands as a
   hard rule: variable indexing straight into a `::` constant is a
-  compile error ("Cannot index a constant") — index constant tables
-  through a materialized local (`xs := CONST`). Relevant to moli's
-  constant tables (char-class ranges, schema column maps).
+  compile error ("Cannot index a constant 'X' with a variable index",
+  with a suggestion to store it into a variable) — index constant
+  tables through a materialized local
+  (`xs := CONST`). Relevant to moli's constant tables (char-class
+  ranges, schema column maps).
 - **Fixed on dev-2026-09**: a make'd map cast into a union used to
   report `len() == 0`, miss every lookup, yet still iterate its
-  entries — probe-verified sound now.
+  entries — probe-verified sound on dev-2026-09 and dev-2026-10.
+- **A map insert whose growth allocation fails is silently dropped**
+  (probe-verified on dev-2026-10: under a failing
+  allocator the insert leaves the map unchanged — no error, no panic,
+  `len` unmoved). A pre-sized map filled within its capacity (the char
+  map's `make(map, n, allocator)` shape) never grows and is immune; a
+  table that grows at runtime must verify the insert took — a
+  post-insert lookup — before treating the map as owning anything
+  (moli's intern_field is the pattern).
 - **Single-test builds segfaulted on green code on dev-2026-08** (the
   `ODIN_TEST_NAMES` define changes the test binary's layout and the
   constant-data bugs were layout-dependent; fixed on dev-2026-09).
   Keep the reflex: reproduce any single-test segfault against the full
-  suite before debugging it.
+  suite before debugging it. The filter is a `-define:` — setting an
+  `ODIN_TEST_NAMES` environment variable does not filter at all.
 - **A `Dynamic_Arena` is self-referential**: never return or copy one
   by value out of the procedure that initialized it — declare it
   inline where it is used.
@@ -311,11 +329,12 @@ are probe-verified gone on dev-2026-09 and kept as history.
   `builder_make_len_cap(0, n, a)`. And `strings.to_string(b)` returns
   a view into the builder's buffer — clone out before returning when a
   `defer builder_destroy` is in scope.
-- `core:path/filepath` traps (verified still present on dev-2026-09):
-  `filepath.abs` returns `""` for input it cannot stat, and
-  `dir("")`/`dir(".")` return `"."`/`""` — a peel loop following `dir`
-  never terminates on such input. Use already-cleaned absolute paths
-  directly and bound any directory-walking loop explicitly.
+- `core:path/filepath` traps (verified still present on dev-2026-09
+  and dev-2026-10): `filepath.abs` returns `""` for input it cannot
+  stat, and `dir("")`/`dir(".")` return `"."`/`""` — a peel loop
+  following `dir` never terminates on such input. Use already-cleaned
+  absolute paths directly and bound any directory-walking loop
+  explicitly.
 
 ### Odin syntax that differs from C and Go
 

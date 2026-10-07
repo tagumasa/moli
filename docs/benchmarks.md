@@ -9,15 +9,18 @@ point here, they never copy its figures.
 
 | Host | CPU | Memory | System | Compiler | Date |
 |---|---|---|---|---|---|
-| x86 dev box | Ryzen 7 5700U, 8 cores / 16 SMT threads | 15 GiB DDR4-3200 dual-channel, NVMe | Linux (native), background-quiet window (CPU PSI 0 at the stamps) | dev-2026-09-nightly `a2fb372`, `-o:speed` | 2026-09-26 |
-| ARM host | Qualcomm Oryon (implementer 0x51, part 0x001), 12 logical CPUs — 1 thread per core; L1d 1.1 MiB × 12, L2 144 MiB × 12 | 7.7 GiB available (WSL2 cgroup) | WSL2 6.6.87.2-microsoft-standard-WSL2 | dev-2026-09-nightly `a2fb372`, `-o:speed` | 2026-09-26 |
+| x86 dev box | Ryzen 7 5700U, 8 cores / 16 SMT threads | 15 GiB DDR4-3200 dual-channel, NVMe | Linux (native), background-quiet window (CPU PSI ~0 at the stamps) | dev-2026-10-nightly `84bc3fc`, `-o:speed` | 2026-10-07 |
+| ARM host | Qualcomm Oryon (implementer 0x51, part 0x001), 12 logical CPUs — 1 thread per core; L1d 1.1 MiB × 12, L2 144 MiB × 12 | 7.7 GiB available (WSL2 cgroup) | WSL2 6.6.87.2-microsoft-standard-WSL2 | dev-2026-10-nightly `84bc3fc`, `-o:speed` | 2026-10-07 |
 
 How to read every table:
 
 - **Wall figures are window measurements.** Run-to-run spread on
   whole-load figures reaches ~10% with background load. Compare within
   a window; re-measure before treating a regression — or an
-  "improvement" — as real.
+  "improvement" — as real. Measurement batches stamp the host's
+  memory and load state into the run log, and a window degraded —
+  including by the measuring process's own footprint — is re-taken,
+  not trusted.
 - **The (x86) and (ARM) columns are convenience, not a
   cross-architecture comparison.** The hosts differ in core count,
   memory subsystem, and (on ARM) a WSL2 layer; each host's numbers
@@ -44,20 +47,20 @@ Raw read (`os.read_entire_file`, warm):
 
 | File | Size | Throughput |
 |---|---|---|
-| lex.csv | 39.6 MiB | 2,199 MiB/s |
-| matrix.def | 21.9 MiB | 11,738 MiB/s |
-| unk.def | ~0 MiB | 437 MiB/s |
-| char.def | ~0 MiB | 800 MiB/s |
-| load set total | 61.6 MiB | **3,095 MiB/s** |
+| lex.csv | 39.6 MiB | 2,477 MiB/s |
+| matrix.def | 21.9 MiB | 7,095 MiB/s |
+| unk.def | ~0 MiB | 428 MiB/s |
+| char.def | ~0 MiB | 816 MiB/s |
+| load set total | 61.6 MiB | **3,224 MiB/s** |
 
-Memory-scan bandwidth: 16,268 MiB/s on one thread; 56,530 MiB/s
-aggregate on 8.
+Memory-scan bandwidth: 16,048 MiB/s on one thread; 61,208 MiB/s
+aggregate on 8 (2.9–4.1× across three runs).
 
-Load decomposition (ipadic, median of 3): full load 0.774 s; lex-only
-`load_bytes` 0.618 s; lex 25% (98K lines) 0.121 s; lex 50% (196K
-lines) 0.258 s. Per-entry slope: 1.834 µs/row (50–100%), 1.405 µs/row
+Load decomposition (ipadic, median of 3): full load 0.690 s; lex-only
+`load_bytes` 0.551 s; lex 25% (98K lines) 0.111 s; lex 50% (196K
+lines) 0.259 s. Per-entry slope: 1.526 µs/row (50–100%), 1.589 µs/row
 (25–50%). Parse proxy — split + clone into an arena over 392,126 rows
-/ 5,097,638 fields: 0.083 s, 0.213 µs/row, 475 MiB/s.
+/ 5,097,638 fields: 0.097 s, 0.248 µs/row, 408 MiB/s.
 
 ## Load (CSV import)
 
@@ -72,16 +75,16 @@ Free from one tracked pass):
 
 | Dictionary | Entries | Matrix | Load (x86) | Load (ARM) | Peak | Free (x86) | Leaks |
 |---|---|---|---|---|---|---|---|
-| ipadic 2.7.0 (UTF-8 converted) | 392,126 | 1316² | 0.92s | 0.77s | 316 MiB | 0.14s | 0 |
-| unidic-mecab 2.1.2 | 756,463 | 5981² | 4.77s | 4.90s | 1162 MiB | 0.28s | 0 |
-| mecab-jieba 0.1.1 | 584,429 | 1×1 stub | 0.89s | 0.66s | 475 MiB | 0.08s | 0 |
+| ipadic 2.7.0 (UTF-8 converted) | 392,126 | 1316² | 0.79s | 0.69s | 300 MiB | 0.11s | 0 |
+| unidic-mecab 2.1.2 | 756,463 | 5981² | 3.39s | 3.34s | 1132 MiB | 0.26s | 0 |
+| mecab-jieba 0.1.1 | 584,429 | 1×1 stub | 0.96s | 0.63s | 471 MiB | 0.08s | 0 |
 
 Peak includes the load arena's whole-file images (unidic: lex.csv
 125 MB + matrix.def 491 MB) plus the sort scratch (~25 B/entry —
 skipped entirely when the CSV is already surface-sorted, as
 mecab-jieba's is). `free` releases string clones far from where they
 were allocated, a locality effect that also moves with the window
-(unidic frees in ~0.26–0.32 s in a quiet one).
+(unidic frees in ~0.24–0.26 s in this window).
 
 ### Load-arm decomposition
 
@@ -93,26 +96,26 @@ runs):
 
 | Arm | Time |
 |---|---|
-| CSV read+parse+clone (per-field cloning is the ownership design) | ~0.69–0.86 s |
-| surface sort (u64 prefix key; order-preserving, ids unchanged) | ~0.27–0.32 s |
-| sort + cedar_build (char map, shadow trie, placement) | ~0.84–0.92 s |
-| matrix import, 8 threads (bandwidth-bound) | ~1.07–1.12 s |
+| CSV read+parse+clone (per-field cloning is the ownership design) | ~0.66–0.75 s |
+| surface sort (u64 prefix key; order-preserving, ids unchanged) | ~0.24 s |
+| sort + cedar_build (char map, shadow trie, placement) | ~0.71–0.81 s |
+| matrix import, 8 threads (parse reworked; now bandwidth-bound) | ~0.68–0.70 s |
 
 ARM, `load_probe.odin`, unidic, two sequential runs (run 2 is
 warm-cache):
 
 | Phase | Run 1 (cold) | Run 2 (warm) |
 |---|---|---|
-| read+parse+clone | 1205 ms | 500 ms |
-| sort+trie build | 868 ms | 702 ms |
+| read+parse+clone | 941 ms | 611 ms |
+| sort+trie build | 844 ms | 692 ms |
 | hand-over | 0 ms | 0 ms |
-| matrix (8 threads) | 1465 ms | 552 ms |
-| scratch destroy | 61 ms | 52 ms |
+| matrix (8 threads) | 1002 ms | 641 ms |
+| scratch destroy | 74 ms | 42 ms |
 
-Cold total ≈ 3.6 s, warm ≈ 1.8 s: the matrix arm is the cold-cache
+Cold total ≈ 2.9 s, warm ≈ 2.0 s: the matrix arm is the cold-cache
 bottleneck, the trie build the warm-cache one. ARM `cedar_probe.odin`
-(unidic, two runs): surface sort 240 / 259 ms; cedar_build (sort re-run
-+ trie) 587 / 649 ms. These serial arms are the next levers only if
+(unidic, two runs): surface sort 243 / 273 ms; cedar_build (sort re-run
++ trie) 517 / 681 ms. These serial arms are the next levers only if
 unidic-scale first-load latency ever matters — the qdct path below is
 the repeat-startup answer.
 
@@ -126,8 +129,8 @@ x86 (unidic; matrix-alone row best-of-3 from one invocation):
 
 | Arm | serial | 2 threads | 4 threads | 8 threads | 16 threads |
 |---|---|---|---|---|---|
-| matrix.def import alone | 3.16s | 1.86s | 1.25s | **0.94s** | — |
-| whole `load` | 4.65s | 3.42s | 2.79s | **2.60s** | 2.48s |
+| matrix.def import alone | 3.69s | 1.81s | 1.26s | **1.06s** | — |
+| whole `load` | 4.89s | 3.49s | 2.79s | **2.57s** | 2.45s |
 
 ARM, `par_bench.odin` whole-load sweep (unidic, median of 3, range in
 parentheses; correctness verified — image and `explicit`
@@ -135,20 +138,20 @@ byte-identical at every thread count):
 
 | threads | median |
 |---|---|
-| 0 (auto) | 4.121 s (3.954–4.289) |
-| 1 | 4.104 s (4.074–4.117) |
-| 2 | 2.822 s (2.614–2.841) |
-| 4 | 2.245 s (2.051–2.275) |
-| 8 | 1.974 s (1.972–2.059) |
-| 16 | **1.915 s** (1.739–1.964) |
+| 0 (auto) | 3.040 s (2.973–3.240) |
+| 1 | 2.885 s (2.826–2.921) |
+| 2 | 1.959 s (1.914–1.981) |
+| 4 | 1.637 s (1.629–1.695) |
+| 8 | 1.631 s (1.552–1.840) |
+| 16 | **1.570 s** (1.536–1.809) |
 
-ARM ipadic whole-load sweep: 0.695 / 0.677 / 0.620 / 0.598 / 0.594 /
-**0.586 s** (auto/1/2/4/8/16). ARM matrix-arm isolation
+ARM ipadic whole-load sweep: 0.542 / 0.576 / 0.498 / 0.501 / 0.505 /
+**0.499 s** (auto/1/2/4/8/16). ARM matrix-arm isolation
 (`par_probe.odin`, `import_matrix_def` alone, 3 runs each): unidic
-serial 2.524–2.562 s → 8 threads 0.477–0.510 s; ipadic serial
-0.107–0.137 s → 8 threads 0.017–0.018 s.
+serial 1.530–1.939 s → 8 threads 0.367–0.440 s; ipadic serial
+0.064–0.077 s → 8 threads 0.014–0.016 s.
 
-- The matrix arm scales **3.4×** at 8 threads on x86, **~5.3×** on ARM
+- The matrix arm scales **3.4×** at 8 threads on x86, **~4.2×** on ARM
   (near-linear to 8 on the no-SMT host). The serial prologue — unidic's
   491 MB read and 71.5 MB dense fill — is Amdahl's floor.
 - The whole load gains only 1.8× (x86) because the lexicon arm stays
@@ -173,13 +176,13 @@ the harness builds its snapshot untimed):
 
 | Dictionary | save (x86) | copy restore (x86) | copy restore (ARM) | mapped restore (x86) | mapped restore (ARM) | File size |
 |---|---|---|---|---|---|---|
-| ipadic 2.7.0 | 0.14s | ~0.099s | 0.087s | ~0.064s | 0.061s | 64 MiB |
-| unidic 2.1.2 | 0.46s | ~0.317s | 0.188s | ~0.198s | 0.095s | 212 MiB |
-| mecab-jieba 0.1.1 | 0.16s | ~0.167s | 0.118s | ~0.115s | 0.055s | 95 MiB |
+| ipadic 2.7.0 | 0.15s | ~0.099s | 0.089s | ~0.064s | 0.061s | 64 MiB |
+| unidic 2.1.2 | 0.46s | ~0.313s | 0.189s | ~0.198s | 0.102s | 212 MiB |
+| mecab-jieba 0.1.1 | 0.14s | ~0.166s | 0.102s | ~0.112s | 0.057s | 95 MiB |
 
 - **What the mapping saves.** `load_qdct_mmap` (POSIX; Windows falls
   back to the read copy) drops the whole-file read copy: the restore
-  falls to ~62–69% of the copy on x86, and to 0.70× / 0.51× / 0.47×
+  falls to ~62–69% of the copy on x86, and to 0.69× / 0.54× / 0.56×
   (ipadic/unidic/jieba) on ARM. Only the rebuild's allocations remain.
 - **Resident set.** x86: a mapped restore ends at the copy's VmRSS
   (+115/+379/+171 MiB), and a smoke tokenize faults in only 8 kB more
@@ -203,22 +206,22 @@ per-call latency, the 100K column steady-state rate.*
 
 | Dictionary | Text | Mode | 1K x86 | 1K ARM | 10K x86 | 10K ARM | 100K x86 | 100K ARM | MiB/s x86 | MiB/s ARM |
 |---|---|---|---|---|---|---|---|---|---|---|
-| ipadic 2.7.0 | JP | Viterbi | 58.7µs | 53.1µs | 769.6µs | 491.6µs | 9.593ms | 6.235ms | 10.18 | 15.67 |
-| ipadic 2.7.0 | JP | LongestMatch | 9.1µs | 7.4µs | 98.5µs | 71.3µs | 1.422ms | 0.678ms | 68.70 | 144.01 |
-| ipadic 2.7.0 | EN | Viterbi | — | 38.0µs | — | — | — | — | — | — |
-| ipadic 2.7.0 | EN | LongestMatch | — | 20.5µs | — | — | — | — | — | — |
-| unidic 2.1.2 | JP | Viterbi | 94.3µs | 76.9µs | 1310.9µs | 695.5µs | 12.940ms | 8.673ms | 7.55 | 11.26 |
-| unidic 2.1.2 | JP | LongestMatch | 9.4µs | 7.7µs | 101.0µs | 74.3µs | 1.472ms | 0.691ms | 66.37 | 141.28 |
-| unidic 2.1.2 | EN | Viterbi | — | 53.5µs | — | — | — | — | — | — |
-| unidic 2.1.2 | EN | LongestMatch | 36.3µs | 26.0µs | — | — | — | — | — | — |
-| jieba 0.1.1 | ZH | Viterbi | 20.6µs | 19.0µs | 211.6µs | 184.6µs | 3.821ms | 1.766ms | 25.56 | 55.31 |
-| jieba 0.1.1 | ZH | LongestMatch | 7.7µs | 6.1µs | 76.4µs | 50.0µs | 1.424ms | 0.532ms | 68.59 | 183.73 |
-| jieba 0.1.1 | EN | Viterbi | — | 38.4µs | — | — | — | — | — | — |
-| jieba 0.1.1 | EN | LongestMatch | 26.0µs | 20.6µs | — | — | — | — | — | — |
+| ipadic 2.7.0 | JP | Viterbi | 63.5µs | 50.5µs | 760.5µs | 477.6µs | 9.315ms | 5.772ms | 10.49 | 16.92 |
+| ipadic 2.7.0 | JP | LongestMatch | 11.5µs | 7.4µs | 110.8µs | 69.7µs | 1.405ms | 0.849ms | 69.52 | 115.11 |
+| ipadic 2.7.0 | EN | Viterbi | — | 38.5µs | — | — | — | — | — | — |
+| ipadic 2.7.0 | EN | LongestMatch | — | 20.7µs | — | — | — | — | — | — |
+| unidic 2.1.2 | JP | Viterbi | 101.6µs | 72.5µs | 1184.8µs | 719.2µs | 13.156ms | 8.365ms | 7.42 | 11.68 |
+| unidic 2.1.2 | JP | LongestMatch | 11.5µs | 7.6µs | 115.2µs | 73.8µs | 1.475ms | 0.822ms | 66.21 | 118.82 |
+| unidic 2.1.2 | EN | Viterbi | — | 68.2µs | — | — | — | — | — | — |
+| unidic 2.1.2 | EN | LongestMatch | 36.3µs | 26.2µs | — | — | — | — | — | — |
+| jieba 0.1.1 | ZH | Viterbi | 23.4µs | 19.4µs | 223.4µs | 185.9µs | 3.435ms | 1.892ms | 28.44 | 51.64 |
+| jieba 0.1.1 | ZH | LongestMatch | 9.5µs | 6.1µs | 82.6µs | 49.9µs | 1.279ms | 0.497ms | 76.40 | 196.71 |
+| jieba 0.1.1 | EN | Viterbi | — | 38.7µs | — | — | — | — | — | — |
+| jieba 0.1.1 | EN | LongestMatch | 26.0µs | 20.7µs | — | — | — | — | — | — |
 
 Hypothesis targets, scored against the x86 columns: greedy JP < 150µs
-(9.1–9.4µs, met), Viterbi JP < 500µs (58.7–94.3µs, met), greedy EN <
-75µs (26.0–36.3µs, met), CSV load < 2500 ms at ipadic scale (0.92 s,
+(9.5–11.5µs, met), Viterbi JP < 500µs (63.5–101.6µs, met), greedy EN <
+75µs (27.7–40.9µs, met), CSV load < 2500 ms at ipadic scale (0.92 s,
 met).
 
 Scaling is near-linear: the 10K→100K step multiplies the Viterbi JP
@@ -230,20 +233,20 @@ behind `build_lattice` is the arm to profile.
 
 Notes:
 
-- `flat_char_class` is not a hotspot. x86 1K Viterbi deltas: −4% to
-  −10% across the 2026-09-11 runs, both signs (−3% to +16%) across
-  2026-09-26. ARM agrees within its window (binary 53.1 µs vs flat
-  49.4 µs). Binary search over ~100 ranges is already cheap.
+- `flat_char_class` is not a hotspot. x86 1K Viterbi deltas move −4%
+  to −10% with both signs (−3% to +16%) across windows. ARM agrees
+  within its window (binary 50.5 µs vs flat 47.7 µs). Binary search
+  over ~100 ranges is already cheap.
 - English on Japanese dictionaries degenerates per-character: unidic's
   lexicon carries single ASCII letters and the space as entries, so
   every byte is a dictionary hit. Not a defect — the EnglishExt schema
   is the intended EN path.
 - N-best at real scale: ipadic 5-best on a 48-byte (16-rune) sentence
-  is 9.9–10.1µs per call on x86 (two runs), 10.5µs on ARM
-  (`bench/nbest_trial.odin`; the micro-scale arm moves ±10% across
-  windows).
+  is 9.8–10.6µs per call on x86 (three runs),
+  9.4µs on ARM (`bench/nbest_trial.odin`; the micro-scale arm moves
+  ±10% across windows).
 - char.def unknown flags (ARM, `flags_speed.odin`, ipadic with
-  invoke=1 / KANJI-split flags): 1K Viterbi 48.7µs, 10K 547.8µs — the
+  invoke=1 / KANJI-split flags): 1K Viterbi 57.6µs, 10K 601.3µs — the
   flag-driven lattice is no slower than the default table's.
 
 ### Text-pool and result-sink throughput
@@ -261,20 +264,20 @@ paragraphs and code-shaped blocks joined with "\n\n"):
 
 | Pool | Viterbi tokenize 100K | Viterbi 240K single call | bytes/token |
 |---|---|---|---|
-| news (no separators) | 10.34 MiB/s | 10.48 MiB/s | 4.67 |
-| novel ("\n\n" paragraphs) | 10.96 MiB/s | 11.39 MiB/s | 4.65 |
-| techdoc ("\n\n" paragraphs) | 11.85 MiB/s | 12.39 MiB/s | 4.79 |
-| code ("\n\n" code blocks) | 12.16 MiB/s | 12.14 MiB/s | 2.70 |
+| news (no separators) | 10.78 MiB/s | 11.23 MiB/s | 4.67 |
+| novel ("\n\n" paragraphs) | 11.47 MiB/s | 12.03 MiB/s | 4.65 |
+| techdoc ("\n\n" paragraphs) | 12.31 MiB/s | 12.48 MiB/s | 4.79 |
+| code ("\n\n" code blocks) | 12.60 MiB/s | 11.82 MiB/s | 2.70 |
 
 ARM (`bench/sink_probe.odin`, ipadic, four ~100 KB pools, median of
 20; MiB/s in parentheses):
 
 | Pool | Viterbi tokenize | Viterbi wakachi | Viterbi spans | Greedy tokenize | Greedy wakachi | Greedy spans | Viterbi 240K arena | Viterbi 240K heap |
 |---|---|---|---|---|---|---|---|---|
-| news (21,943 / 20,886 items) | 5,910µs (16.53) | 5,619µs (17.38) | 5,485µs (17.81) | 703µs (139.01) | 421µs (231.89) | 432µs (226.02) | 13,788µs (17.00) | 72,613µs (3.23) |
-| novel (22,033 / 21,083) | 5,240µs (18.65) | 4,976µs (19.64) | 5,093µs (19.19) | 790µs (123.67) | 450µs (217.11) | 528µs (185.20) | 12,926µs (18.13) | 66,602µs (3.52) |
-| techdoc (21,370 / 22,156) | 4,624µs (21.12) | 4,683µs (20.86) | 4,546µs (21.49) | 951µs (102.68) | 576µs (169.64) | 607µs (160.81) | 12,009µs (19.52) | 63,323µs (3.70) |
-| code (37,916 / 38,048) | 4,488µs (21.80) | 4,454µs (21.96) | 4,303µs (22.73) | 2,336µs (41.88) | 1,556µs (62.87) | 1,651µs (59.25) | 12,203µs (19.21) | 68,674µs (3.41) |
+| news (21,943 / 20,886 items) | 5,963µs (16.38) | 5,857µs (16.68) | 5,907µs (16.54) | 737µs (132.49) | 416µs (234.87) | 440µs (221.98) | 14,133µs (16.59) | 51,978µs (4.51) |
+| novel (22,033 / 21,083) | 5,296µs (18.46) | 5,030µs (19.43) | 5,021µs (19.68) | 807µs (121.04) | 452µs (216.24) | 476µs (205.23) | 12,703µs (18.45) | 73,656µs (3.18) |
+| techdoc (21,370 / 22,156) | 4,371µs (22.34) | 4,652µs (21.00) | 4,801µs (20.35) | 1,030µs (94.81) | 609µs (160.44) | 623µs (156.91) | 11,349µs (20.66) | 71,707µs (3.27) |
+| code (37,916 / 38,048) | 4,725µs (20.70) | 4,725µs (20.70) | 4,556µs (21.47) | 2,959µs (33.05) | 1,779µs (54.98) | 2,007µs (48.75) | 12,750µs (18.39) | 81,442µs (2.88) |
 
 - **Viterbi is style-flat.** Unknown-heavy styles do not regress it —
   whitespace runs are near-free lattice bytes and a grouped unknown is
@@ -290,9 +293,11 @@ ARM (`bench/sink_probe.odin`, ipadic, four ~100 KB pools, median of
 - **Heap sinks, not the engine, set the rate at this shape.** The
   identical 240 KiB Viterbi call through the default heap — one exact
   multi-megabyte result allocation per call, freed per call — runs
-  2.1–2.2× below the arena arms on x86 (4.70–5.71 MiB/s) and ~5× below
-  on ARM (3.23–3.70 MiB/s). The downstream user measured 1.8×
-  independently on the x86 machine and binary. Repeated callers keep
+  2.1–2.2× below the arena arms on x86 (4.70–5.71 MiB/s) and ~3.5–6.5×
+  below on ARM (2.88–4.53 MiB/s; the spread widens with item density
+  — the code pool's ~38K items per 100 KB land the heap at 2.88
+  MiB/s). The downstream user measured 1.8× independently on the x86
+  machine and binary. Repeated callers keep
   the arena rate with a per-request arena or `tokenize_into`'s reused
   caller buffer. A non-arena result allocator is Viterbi-only — the
   greedy emission's growth abandons each grown-out block to the arena
@@ -341,10 +346,10 @@ sharing itself costs anything.*
 
 | workers | shared, x86 | control, x86 | shared, ARM | control, ARM |
 |---|---|---|---|---|
-| 1 | 10.36 MiB/s (1.00×) | 10.57 MiB/s (1.00×) | 15.35 MiB/s (1.00×) | 15.25 MiB/s (1.00×) |
-| 2 | 1.51× | 1.59× | 1.92× | 1.89× |
-| 4 | 1.97× | 1.88× | 3.27× | 3.38× |
-| 8 | 2.10× | 2.03× | 4.28× | 4.19× |
+| 1 | 10.64 MiB/s (1.00×) | 10.76 MiB/s (1.00×) | 16.51 MiB/s (1.00×) | 17.79 MiB/s (1.00×) |
+| 2 | 1.47× | 1.48× | 2.03× | 1.86× |
+| 4 | 1.99× | 2.01× | 3.22× | 2.94× |
+| 8 | 2.15× | 2.10× | 4.09× | 3.76× |
 
 - **Sharing costs nothing**: on both hosts the shared and control
   sweeps agree within their spread.
@@ -353,10 +358,10 @@ sharing itself costs anything.*
   of tables overflow L3, and the trie walk's random access pays RAM
   latency — size a pool around ~2× single-thread throughput on that
   class of part, or partition dictionaries per worker. ARM (12 full
-  cores, no SMT, large per-core L2) scales near-linearly: 4.28× at 8
+  cores, no SMT, large per-core L2) scales near-linearly: 4.09× at 8
   workers.
 - The x86 8-worker multiplier moves with the window like every wall
-  figure (2.0–2.2× in this window, single-thread ~10.4 MiB/s).
+  figure (2.1–2.2× in this window, single-thread ~10.6–10.7 MiB/s).
 
 ## Against MeCab and ChaSen
 
@@ -378,15 +383,15 @@ cross-window absolutes are not.
 
 | API | rate (x86) | rate (ARM) |
 |---|---|---|
-| mecab default (full features) | 6.99 MiB/s | 11.14 MiB/s |
-| mecab -Owakati | 8.22 MiB/s | 13.73 MiB/s |
-| chasen default (full features) | 0.44 MiB/s | — |
+| mecab default (full features) | 6.92 MiB/s | 11.49 MiB/s |
+| mecab -Owakati | 8.10 MiB/s | 11.69 MiB/s |
+| chasen default (full features) | 0.42 MiB/s | — |
 | chasen wakati | 0.44 MiB/s | — |
-| moli tokenize (view, len only) | 4.00 MiB/s | 5.64 MiB/s |
-| moli tokenize (full list) | 2.23 MiB/s | 2.75 MiB/s |
-| moli wakachi (surface strings) | 4.13 MiB/s | 5.56 MiB/s |
-| moli parse (one TSV string) | 3.73 MiB/s | 5.19 MiB/s |
-| moli wakati (one space-joined string) | 4.35 MiB/s | 5.96 MiB/s |
+| moli tokenize (view, len only) | 4.08 MiB/s | 5.62 MiB/s |
+| moli tokenize (full list) | 1.34 MiB/s | 1.84 MiB/s |
+| moli wakachi (surface strings) | 4.20 MiB/s | 5.44 MiB/s |
+| moli parse (one TSV string) | 3.81 MiB/s | 5.65 MiB/s |
+| moli wakati (one space-joined string) | 4.50 MiB/s | 6.06 MiB/s |
 
 ChaSen 2.4.5 (the Debian package; x86 arm) joins through libchasen
 driven in-process via ctypes, configured by a run-time copy of the
@@ -465,24 +470,24 @@ chunked, and it is host-dependent.
 
 x86, one window (`sdk_mecab_compare`'s chunked arms, 8/16 KB safe-cut
 pieces of the "\n\n"-joined pool, medians of 15): mecab -Owakati
-12.65/10.76 MiB/s against moli wakati 15.09/12.10 — a real but thin
-1.1–1.2× edge (the lazy view 13.04/10.59). The 307 KB single call sits
-at ~0.5× (8.22 vs 4.35, the fresh-map shape).
+12.51/11.44 MiB/s against moli wakati 14.69/11.84 — a real but thin
+1.1–1.2× edge (the lazy view 12.87/10.55). The 307 KB single call sits
+at ~0.55× (8.10 vs 4.50, the fresh-map shape).
 
-ARM, median of 15:
+ARM, medians of 15:
 
-| arm | 2 KB | 8 KB | 16 KB | 64 KB |
-|---|---|---|---|---|
-| mecab -Owakati | 24.2 MiB/s | 24.5 MiB/s | 24.3 MiB/s | 18.4 MiB/s |
-| moli wakati | 11.6 MiB/s | 18.5 MiB/s | 17.3 MiB/s | 15.8 MiB/s |
-| moli wakachi | 15.5 MiB/s | 15.4 MiB/s | 15.3 MiB/s | 13.3 MiB/s |
+| arm | 8 KB | 16 KB |
+|---|---|---|
+| mecab -Owakati | 23.2 MiB/s | 24.4 MiB/s |
+| moli wakati | 16.1 MiB/s | 18.2 MiB/s |
+| moli tokenize view | 17.1 MiB/s | 14.7 MiB/s |
 
-- moli wakati peaks at 8 KB (18.5 MiB/s, 0.76× mecab); the 2 KB arm
-  sits lower — a per-call fixed cost that amortises from 8 KB onward.
+- moli wakati peaks at 8 KB (16.1 MiB/s, 0.69× mecab); a per-call
+  fixed cost amortises from 8 KB onward.
   "Above the MeCab binding" is an x86-window statement, not a platform
   claim.
-- The native engine (Viterbi 15.7 MiB/s at 100K ipadic, the ARM
-  tokenize column) is ahead of mecab full-features (11.1 MiB/s at 307
+- The native engine (Viterbi 16.9 MiB/s at 100K ipadic, the ARM
+  tokenize column) is ahead of mecab full-features (11.5 MiB/s at 307
   KB) — the gap is entirely in the SDK layer.
 - The chunked path needs newline structure: the safe-cut rule places
   cuts only after newline-ending whitespace runs, so a no-separator
@@ -513,7 +518,7 @@ pairing; sentences reconstructed from gold morpheme surfaces; interior
 boundary offsets compared with a two-pointer over ascending lists,
 micro-aggregated.
 
-- **Precision 0.9009, recall 0.9618, F1 0.9303** (2026-09-26,
+- **Precision 0.9009, recall 0.9618, F1 0.9303** (2026-10-07,
   same-set protocol below): 16,037 sentences, gold boundaries 236,704,
   predicted 252,707, matched 227,657; unknown morphemes 1.09%;
   run-grouped control 0.9271.
@@ -545,8 +550,8 @@ micro-aggregated.
   The resource stays shipped for labelling and for dictionaries whose
   affixes are OOV.
 - **The unknown-cost parameter space is flat** (`f1_grid.odin`,
-  2026-09-11: bias −4000…+4000 × per_rune 0…5000, 54 points, same
-  corpus): the best point (bias −4000, per_rune 1000) reaches 0.9314
+  bias −4000…+4000 × per_rune 0…5000, 54 points, same corpus): the
+  best point (bias −4000, per_rune 1000) reaches 0.9314
   against the default 0/0's 0.9303 — +0.0011, a tenth of the 0.9406
   oracle ceiling. The surface is ridge-shaped in per_rune alone (1000
   the mild ridge, 5000 a valley at 0.9272) and insensitive to bias.
@@ -559,11 +564,11 @@ micro-aggregated.
 *What it measures: what a perfect re-ranker over moli's own N-best
 enumeration could add — the ceiling for any post-hoc ranking work.*
 
-`f1_oracle_nbest.odin`, same corpus and protocol (16,037 sentences,
-re-run 2026-09-26; oracle@1 reproduces the faithful arm exactly):
-every sentence enumerated with `tokenize_nbest` 10-best, each path
-scored against the gold interior boundaries. Deterministic — the
-enumeration is the shipped engine.
+`f1_oracle_nbest.odin`, same corpus and protocol (16,037 sentences;
+oracle@1 reproduces the faithful arm exactly): every sentence
+enumerated with `tokenize_nbest` 10-best, each path scored against
+the gold interior boundaries. Deterministic — the enumeration is the
+shipped engine.
 
 - **oracle@k** — boundary F1 of the best path within the k cheapest:
   @1 0.9303, @3 0.9353, @5 0.9376, @10 0.9406. A perfect re-ranker
@@ -610,22 +615,20 @@ actually executes — reported as lower bounds: a failure-path branch
 only a failing allocator fires is dark by construction. Improvements
 come from fault-injection breadth, not chasing percentages.*
 
-Measured 2026-09-26 on the x86 host; the measured file list derives
+Measured 2026-10-07 on the x86 host; the measured file list derives
 from `src/moli` at run time (platform-suffixed files compiled out of
 the current build are excluded, so a new source file cannot silently
 escape measurement).
 
-- **Function: 233/235 = 99.1%.** The two dark symbols are real, not
-  inlining artifacts: `greedy_walk`'s `[dynamic]Morpheme`
-  specialisation (the `tokenize_into` sink, unexercised in
-  LongestMatch mode by the measured build) and `lemma_rewrite_en_gb`
-  (the suite loads `.EnglishGB` with `lemma_locale` US or None, never
-  GB). Both gained tests after the measurement pass.
-- **Lines: 2597/2944 = 88.2% strict; 2597/2723 = 95.4%** on lines that
-  carry machine code — 221 dark lines are structural (field
+- **Function: 238/239 = 99.6%.** The one dark symbol is real, not an
+  inlining artifact: `drain_wait_sleep`, the default teardown drain
+  hook — every test frees with `in_use` already zero, so the polling
+  sleep never runs.
+- **Lines: 2694/3027 = 89.0% strict; 2694/2829 = 95.2%** on lines that
+  carry machine code — 198 dark lines are structural (field
   continuations, else-braces, jump-table labels) and can never be
   marked.
-- **Branches: 355/778 = 45.6%** of encountered **moli** conditional
+- **Branches: 361/799 = 45.2%** of encountered **moli** conditional
   sites executed in both directions, no landing-side exclusion (an arm
   whose job is to fail counts as a branch). Each `if err != nil` is a
   branch whose failure side exists to fire under a failing allocator,
@@ -669,7 +672,7 @@ fixture and texts, so the difference is wrapper + boxing cost alone.*
 
 `just sdk-probe` (one analyser held, sequential calls, warm-up first)
 against the ipadic fixture; native reference from
-`bench/native_probe.odin`. Measured 2026-09-26 on the ABI-v7 tree
+`bench/native_probe.odin`. Measured 2026-10-07 on the ABI-v7 tree
 (x86), unified statistic: the median of five block means on both
 columns.
 
@@ -679,35 +682,36 @@ per-slot build lock on first materialisation.
 
 | call | native (x86) | Python SDK (x86) | native (ARM) |
 |---|---|---|---|
-| tokenize 犬が歩く (view, unread) | 0.39 µs | 1.46 µs | 0.70 µs |
-| tokenize 犬が歩く [0] (3rd of 3) | — | 2.72 µs | — |
-| tokenize 犬が歩く ×100 (view, unread) | 7.96 µs | 27.08 µs | — |
-| tokenize 犬が歩く ×100, list() (300 morphemes) | — | 209.7 µs | — |
-| tokenize 1,200 bytes (300 morphemes) | — | — | 14.70 µs |
-| wakachi small | — | 1.63 µs | — |
-| spans small | — | 2.45 µs | — |
-| nbest small k=3 | — | 4.95 µs | — |
-| stats | — | 0.79 µs | — |
+| tokenize 犬が歩く (view, unread) | 0.41 µs | 1.57 µs | 0.57 µs |
+| tokenize 犬が歩く [0] (3rd of 3) | — | 4.3 µs | — |
+| tokenize 犬が歩く ×100 (view, unread) | 7.41 µs | 28.3 µs | — |
+| tokenize 犬が歩く ×100, list() (300 morphemes) | — | 597 µs | — |
+| tokenize 1,200 bytes (300 morphemes) | — | — | 9.77 µs |
+| wakachi small | — | 1.69 µs | — |
+| spans small | — | 2.61 µs | — |
+| nbest small k=3 | — | 5.27 µs | — |
+| stats | — | 2.10 µs | — |
 | classify_locale | — | 0.14 µs | — |
-| snapshot (fixture, ~5 KB image) | — | 1.40 µs | — |
+| snapshot (fixture, ~5 KB image) | — | 1.39 µs | — |
 
 - **An unread `tokenize` call** costs engine + result box + the
   wrapper's in-flight bracket (two uncontended mutex acquisitions,
   ≈0.02 µs).
-- **Reading a morpheme builds it on access**: ≈0.61 µs per morpheme
-  fully materialised (cached enum singletons, per-view interning of
-  repeated dictionary fields, direct `tuple.__new__`, one list slot,
-  and the first-materialisation build lock that makes concurrent
+- **Reading a morpheme builds it on access**: list() of a 300-morpheme
+  result costs ≈1.9 µs per morpheme beyond the unread view (cached
+  enum singletons, per-view interning of repeated dictionary fields,
+  direct `tuple.__new__`, one list slot, and the
+  first-materialisation build lock that makes concurrent
   materialisation of one view safe) — paid only on results actually
   read.
 - **Result memory follows the same shape** (VmRSS delta for holding
-  1 MiB of chunked Japanese text, 64 results, fresh process;
-  2026-09-11): eager `list()` of everything ≈ 189 MiB (76 MiB traced
+  1 MiB of chunked Japanese text, 64 results, fresh process): eager
+  `list()` of everything ≈ 189 MiB (76 MiB traced
   Python objects plus allocator growth); unread views ≈ 30 MiB (the
   native boxes); first-10-per-chunk ≈ 6.9 MiB, where the eager build's
   transient full lists cost ≈ 11 MiB.
 - **The cheap calls stay cheap**: classify_locale ≈ 0.14 µs; stats at
-  ≈ 0.8 µs is a plain cached read — the entries fingerprint is stamped
+  ≈ 2 µs is a plain cached read — the entries fingerprint is stamped
   once at construction, so no lock-and-rewrite fixed cost sits on the
   call.
 
@@ -723,7 +727,7 @@ out-of-vocabulary compounds split like a German reader would.*
 | Metric | Value |
 |---|---|
 | Entries loaded | 53,531 |
-| Load time | 76 µs |
+| Load time | 164.2 ms |
 | Skipped rows | 2 |
 | Leaks | 0 |
 
@@ -783,10 +787,51 @@ which are the specification.
   `tuple.__new__` cut to Span/NBestPath/Stats plus an iterator
   `__length_hint__` measures null (spans −0.35%, ~5 ns/item; `list()`
   +0.01% — `list(view)` already presizes via the view's `sq_length`).
+- **The DP relaxation carries no bounds checks.** Every index in the
+  relaxation loop is a lattice index by construction — the loop bound,
+  the successor-bucket invariant, the walk table — so the loop body
+  runs `#no_bounds_check` while the externally-derived matrix ids keep
+  their guards: −9.28 M instructions deterministic on the ipadic 100 K
+  arm, −2% wall over five alternating pairs (four of five; the
+  untouched greedy control in the same binary pair moves ±2.5%, the
+  binary-layout noise floor this figure sits above).
+- **The importer's numeric columns parse through a digits-only loop.**
+  `strconv.parse_int` pays its prefixed/radix general path on every CSV
+  and matrix.def numeric column, and matrix.def alone carries over a
+  hundred million columns at unidic scale. The plain decimal loop
+  (values past i64 saturate; the callers' range checks own the
+  decisions) measures 3.59 s on the unidic whole-load against 4.44 s
+  without it — one alternating window, entries fingerprint identical,
+  −16% of the ipadic import's instructions deterministically.
+- **One matrix line, one byte pass.** Staging every `left right cost`
+  triple through the split buffer's `[dynamic]` round-trip before
+  parsing cost a buffer traffic the parse never needed: locating the
+  first three fields and parsing them where they lie measures 3.22 s
+  against 3.66 s on the unidic whole-load (same alternating window,
+  fingerprint identical), and the parallel workers now touch no
+  allocator at all.
+- **The importer interns its repeated field values.** The dictionary's
+  joined POS strings repeat across nearly every row (unidic: 1,574
+  distinct over 756,463 rows) and its "*" sentinels repeat on every
+  row that has no reading or lemma, so one canonical copy per distinct
+  value replaces the per-row clones: measured at unidic scale, the
+  resident set after load is 458,360 kB with the intern table against
+  534,992 kB without it (−14.3%), and the tracked load peak 1132 MiB
+  against 1162 MiB, with the entries fingerprint bit-identical
+  (ownership only, never content) and the whole-load wall unchanged.
+  Surfaces and the high-cardinality real readings and lemmas stay
+  per-row — interning those would trade their clone rows for a
+  comparable mass of map entries.
 - **The entries fingerprint mixes words, not bytes** — eight bytes per
-  step cuts the construction-time walk ~8× in instructions (the FNV-1a
-  chain is latency-bound at one dependent multiply per byte). A
-  zero-copy mapped restore of the cedar arrays is refused on bounded
+  step cuts the construction-time walk ~8× in instructions. The walk
+  is 48.5% of restore instructions but 13–14% of restore wall (103.9 ms
+  with the walk against 89.8 ms with it stubbed, one alternating
+  window), so its cost is instruction mass, not the dependent multiply
+  chain. Core-library hash swaps measured slower or at parity in every
+  shape — per-field XXH64 +13% of the whole restore, 8 KiB-chunked
+  XXH64 +8%, chunked XXH3_64 +5%, per-field XXH3_64 at parity — so the
+  word-stepped FNV stays. A zero-copy mapped
+  restore of the cedar arrays is refused on bounded
   gain: ~15–25 ms of the 141 ms unidic mapped restore, against the
   ownership shadow the build path would then have to carry.
 - **The lattice build walks each same-class run once.** A per-position
