@@ -39,7 +39,7 @@ import "moli:moli"
 ABI_VERSION :: 7
 
 // LIBRARY_VERSION is the moli version string returned by moli_version.
-LIBRARY_VERSION :: "0.1.0"
+LIBRARY_VERSION :: "0.1.1"
 
 // Failure domains; the code vocabulary is closed per domain and
 // mirrors the library's error model one-to-one: each `*_Code` enum is

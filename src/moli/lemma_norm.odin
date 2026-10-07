@@ -215,8 +215,11 @@ normalize_lemmas :: proc(a: ^Analyzer, target: Locale, allocator: mem.Allocator)
 		ne, changed, err := rewrite(e.lemma, allocator)
 		if err != nil { return err }
 		if changed {
-			delete(e.lemma, allocator)
+			if e.interned & INTERN_LEMMA == 0 {
+				delete(e.lemma, allocator)
+			}
 			a.entries[i].lemma = ne
+			a.entries[i].interned &= ~INTERN_LEMMA
 		}
 	}
 	return nil

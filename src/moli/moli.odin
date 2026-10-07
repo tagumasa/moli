@@ -222,6 +222,12 @@ load_from :: proc(lang: Language, src: Csv_Source, opts: Load_Options, allocator
 	if merr != nil { load_release_partial(&imp, &a); return Analyzer{}, .OutOfMemory }
 	imp.unk_patterns, merr = make([dynamic]Unk_Pattern, 0, 4, allocator)
 	if merr != nil { load_release_partial(&imp, &a); return Analyzer{}, .OutOfMemory }
+	intern_table, ierr := intern_table_init(imp.allocator)
+	if ierr != nil {
+		load_release_partial(&imp, &a)
+		return Analyzer{}, ierr
+	}
+	imp.intern = intern_table
 
 	// Discover optional resource paths (the strings live in the load
 	// scratch: they are used for opens within load only). A bytes
@@ -277,11 +283,13 @@ load_from :: proc(lang: Language, src: Csv_Source, opts: Load_Options, allocator
 		return Analyzer{}, err
 	}
 
-	// Hand entries + char_map + cedar over to the analyzer. The imp
-	// side is nil'd at hand-over so the failure path can never free a
-	// handed-over buffer twice.
+	// Hand entries + intern table + char_map + cedar over to the
+	// analyzer. The imp side is nil'd at hand-over so the failure path
+	// can never free a handed-over buffer twice.
 	a.entries = imp.entries
 	imp.entries = nil
+	a.intern = imp.intern
+	imp.intern = nil
 	a.char_map = builder.char_map
 
 	// Optional: char.def. char_flags starts at the built-in default
@@ -418,6 +426,7 @@ load_release_partial :: proc(imp: ^Importer, a: ^Analyzer) {
 		unk_pattern_destroy(&p, imp.allocator)
 	}
 	delete(imp.unk_patterns)
+	intern_table_release(&imp.intern, imp.allocator)
 	if imp.conn_matrix.n_left > 0 {
 		delete(imp.conn_matrix.costs)
 	}
@@ -427,6 +436,7 @@ load_release_partial :: proc(imp: ^Importer, a: ^Analyzer) {
 		dictionary_entry_destroy(&e, a.allocator)
 	}
 	delete(a.entries)
+	intern_table_release(&a.intern, a.allocator)
 	for rule in a.unk_def {
 		r := rule
 		unk_rule_destroy(&r, a.allocator)
@@ -669,6 +679,11 @@ free :: proc(a: ^Analyzer) {
 		}
 	}
 	delete(a.entries)
+
+	// The interned fields' canonical copies: the row loop skipped them
+	// by mask, so this is their release. Snapshot analyzers never
+	// built one.
+	intern_table_release(&a.intern, a.allocator)
 
 	if !image_owned {
 		for rule in a.unk_def {

@@ -25,10 +25,10 @@ main :: proc() {
 
 	t0 := time.tick_now()
 	a, err := moli.load(.German, "dict/german/german.csv", {}, tracked)
-	load_us := time.tick_diff(t0, time.tick_now()) / time.Microsecond
+	load_wall := time.tick_diff(t0, time.tick_now())
 	if err != nil { fmt.printf("load FAILED: %v\n", err); return }
-	fmt.printf("loaded in %v us: %v entries, unk rules %v, skipped %v\n",
-		load_us, len(a.entries), len(a.unk_def), len(a.skipped_resources))
+	fmt.printf("loaded in %v: %v entries, unk rules %v, skipped %v\n",
+		load_wall, len(a.entries), len(a.unk_def), len(a.skipped_resources))
 
 	arena_buf := make([]u8, 1 << 22, tracked)
 	arena: mem.Arena

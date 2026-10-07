@@ -53,7 +53,50 @@ Importer :: struct {
 	scratch:      mem.Dynamic_Arena,
 	fields_buf:   [dynamic]string, // per-line CSV field slices, reset for each record
 	unquoted_buf: [dynamic]u8,     // per-line unquoted-field bytes, reset the same way
+	intern:       map[string]string, // canonical repeated field values; handed over to the analyzer
 	allocator:        mem.Allocator,
+}
+
+// intern_table_init creates the intern table with its one
+// pre-registered member: the canonical "*" the sentinel fields
+// borrow instead of cloning. The pre-registration rides the table's
+// initial capacity, so no growth allocation can drop it.
+intern_table_init :: proc(allocator: mem.Allocator) -> (table: map[string]string, err: Load_Err) {
+	t, merr := make(map[string]string, 16, allocator)
+	if merr != nil { return nil, .OutOfMemory }
+	star, cerr := clone_str("*", allocator)
+	if cerr != nil { return nil, cerr }
+	t["*"] = star
+	return t, nil
+}
+
+// intern_table_release releases the intern table's canonical strings
+// and the table itself. Nil-safe for paths that never initialized or
+// already handed over the table.
+intern_table_release :: proc(intern: ^map[string]string, allocator: mem.Allocator) {
+	for _, s in intern^ {
+		delete(s, allocator)
+	}
+	delete(intern^)
+	intern^ = nil
+}
+
+// intern_field registers one freshly built field value in the intern
+// table and answers the row's view of it plus the mask bit. The
+// post-insert lookup exists because Odin map inserts silently drop a
+// failed growth allocation - the map stays unchanged, no error, no
+// panic - and a dropped insert must leave the row owning its copy,
+// never the table claiming a string it does not hold.
+intern_field :: proc(intern: ^map[string]string, fresh: string, bit: u8, allocator: mem.Allocator) -> (view: string, mask: u8) {
+	if canon, ok := intern^[fresh]; ok {
+		delete(fresh, allocator)
+		return canon, bit
+	}
+	intern^[fresh] = fresh
+	if _, ok := intern^[fresh]; ok {
+		return fresh, bit
+	}
+	return fresh, 0
 }
 
 // importer_init_bufs makes the two per-line scratch buffers on first
@@ -370,7 +413,7 @@ importer_read_csv :: proc(imp: ^Importer, src: Csv_Source) -> Load_Err {
 // owns appended rows - and fails the load rather than silently
 // truncating the dictionary.
 parse_and_append :: proc(imp: ^Importer, line: []byte, line_no: int, expected_cols: int) -> Load_Err {
-	entry, perr := parse_entry(imp.schema, line, line_no, expected_cols, imp.allocator, &imp.fields_buf, &imp.unquoted_buf)
+	entry, perr := parse_entry(imp.schema, line, line_no, expected_cols, imp.allocator, &imp.fields_buf, &imp.unquoted_buf, &imp.intern)
 	if perr != nil { return perr }
 	if _, aerr := append(&imp.entries, entry); aerr != nil {
 		dictionary_entry_destroy(&entry, imp.allocator)
@@ -512,11 +555,14 @@ parse_conn_triple :: proc(fields: []string, off: int) -> (left, right, cost: i16
 // parse_entry splits one record, validates the column count against
 // the schema (a mismatch answers Schema_Mismatch_Error and aborts the
 // load), parses the ids and the saturated-clamped cost, prejoins the
-// POS columns, and clones every escaping string into allocator - transient
-// slices stay in scratch. All validation precedes the first clone, so
-// failure paths never strand a partial entry; a clone that fails
-// mid-way destroys what it already built and answers .OutOfMemory.
-parse_entry :: proc(schema: Schema, line: []byte, line_no: int, expected_cols: int, allocator: mem.Allocator, fields_buf: ^[dynamic]string, unquoted_buf: ^[dynamic]u8) -> (Dictionary_Entry, Load_Err) {
+// POS columns, and clones every escaping string into allocator -
+// transient slices stay in scratch. The repeatable fields (joined_pos
+// always, the "*" sentinels) borrow the table's canonical copies
+// through intern_field instead of keeping their fresh clones. All
+// validation precedes the first clone, so failure paths never strand
+// a partial entry; a clone that fails mid-way destroys what it
+// already built and answers .OutOfMemory.
+parse_entry :: proc(schema: Schema, line: []byte, line_no: int, expected_cols: int, allocator: mem.Allocator, fields_buf: ^[dynamic]string, unquoted_buf: ^[dynamic]u8, intern: ^map[string]string) -> (Dictionary_Entry, Load_Err) {
 	fields, serr := split_fields(string(line), fields_buf, unquoted_buf)
 	if serr != nil { return Dictionary_Entry{}, serr }
 	if len(fields) != expected_cols {
@@ -539,12 +585,24 @@ parse_entry :: proc(schema: Schema, line: []byte, line_no: int, expected_cols: i
 		cols := SCHEMA_COLUMNS // materialized: constants refuse variable indexing
 		c := cols[schema]
 
-		entry.joined_pos, failed = join_pos(fields[c.pos_from:c.pos_to], allocator)
+		joined, jerr := join_pos(fields[c.pos_from:c.pos_to], allocator)
+		if jerr != nil {
+			failed = jerr
+		} else {
+			view, mask := intern_field(intern, joined, INTERN_JOINED_POS, allocator)
+			entry.joined_pos = view
+			entry.interned |= mask
+		}
 		if failed == nil {
 			if c.lemma == LEMMA_SURFACE {
 				entry.lemma, failed = clone_str(fields[0], allocator)
 			} else {
 				entry.lemma, failed = clone_str(fields[c.lemma], allocator)
+			}
+			if failed == nil && entry.lemma == "*" {
+				view, mask := intern_field(intern, entry.lemma, INTERN_LEMMA, allocator)
+				entry.lemma = view
+				entry.interned |= mask
 			}
 		}
 		if failed == nil {
@@ -554,8 +612,20 @@ parse_entry :: proc(schema: Schema, line: []byte, line_no: int, expected_cols: i
 			} else {
 				entry.reading, failed = clone_str(fields[c.reading], allocator)
 			}
+			if failed == nil && entry.reading == "*" {
+				view, mask := intern_field(intern, entry.reading, INTERN_READING, allocator)
+				entry.reading = view
+				entry.interned |= mask
+			}
 		}
-		if failed == nil { entry.reading_jyutping, failed = clone_str("*", allocator) }
+		if failed == nil {
+			if canon, ok := intern^["*"]; ok {
+				entry.reading_jyutping = canon
+				entry.interned |= INTERN_READING_JYUTPING
+			} else {
+				entry.reading_jyutping, failed = clone_str("*", allocator)
+			}
+		}
 		if failed == nil && c.extras_from != EXTRAS_NONE && len(fields) > c.extras_from {
 			extras_to := c.extras_to
 			if extras_to == EXTRAS_TO_END || extras_to > len(fields) { extras_to = len(fields) }
@@ -816,8 +886,11 @@ import_jyutping_csv :: proc(imp: ^Importer, a: ^Analyzer, path: string) -> Load_
 			if e.reading_jyutping != "*" { continue }
 			cloned, cerr := clone_str(jyutping, imp.allocator)
 			if cerr != nil { return cerr }
-			delete(e.reading_jyutping, imp.allocator)
+			if e.interned & INTERN_READING_JYUTPING == 0 {
+				delete(e.reading_jyutping, imp.allocator)
+			}
 			e.reading_jyutping = cloned
+			e.interned &= ~INTERN_READING_JYUTPING
 		}
 	}
 	return nil
@@ -845,8 +918,8 @@ import_matrix_def :: proc(imp: ^Importer, path: string, threads: int) -> Load_Er
 	if herr != nil { return herr }
 	pos += 1
 	if len(hfields) < 2 { return .Invalid_Format }
-	n_left, ok1 := strconv.parse_int(hfields[0])
-	n_right, ok2 := strconv.parse_int(hfields[1])
+	n_left, ok1 := parse_decimal(hfields[0])
+	n_right, ok2 := parse_decimal(hfields[1])
 	if !ok1 || !ok2 { return .Invalid_Format }
 	if n_left < 0 || n_right < 0 { return .Invalid_Format }
 	i16_max := int(max(i16))
@@ -930,27 +1003,12 @@ Matrix_Worker :: struct {
 }
 
 // matrix_worker_proc walks its chunk's lines in file order, writing
-// each cell directly and marking its own bitset. The field buffer
-// lives in a dynamic arena created and destroyed inside this
-// procedure (a dynamic arena is self-referential and must not escape
-// the procedure that initialized it); its growth races nothing
-// because the arena is single-threaded per worker.
+// each cell directly and marking its own bitset. The fused line parse
+// allocates nothing, so the worker touches no allocator at all - the
+// loading thread's (possibly tracking) allocator never crosses the
+// thread boundary.
 matrix_worker_proc :: proc(th: ^thread.Thread) {
 	w := cast(^Matrix_Worker)(th.data)
-
-	scratch: mem.Dynamic_Arena
-	// Both arena allocators explicit: worker threads run on the
-	// runtime's default context, whose allocator is the raw global
-	// heap — thread-safe by contract, unlike the loading thread's
-	// (possibly tracking) allocator, which must not cross the thread
-	// boundary. Naming it keeps that decision visible instead of
-	// implicit.
-	mem.dynamic_arena_init(&scratch, block_size = 1 << 12,
-	                       block_allocator = runtime.default_allocator(),
-	                       array_allocator = runtime.default_allocator())
-	defer mem.dynamic_arena_destroy(&scratch)
-	fields, ferr := make([dynamic]string, 0, 32, mem.dynamic_arena_allocator(&scratch))
-	if ferr != nil { w.err = .OutOfMemory; return }
 
 	p := w.start
 	for p < w.end {
@@ -959,7 +1017,7 @@ matrix_worker_proc :: proc(th: ^thread.Thread) {
 		p = end + 1
 
 		if !line_blank(line) {
-			idx, cost, perr := parse_matrix_triple(line, w.n_left, w.n_right, &fields)
+			idx, cost, perr := parse_matrix_triple(line, w.n_left, w.n_right)
 			if perr != nil { w.err = perr; return }
 			// Relaxed atomic store: a cell repeated across two chunks
 			// makes two workers target the same slot - the serial
@@ -1139,7 +1197,7 @@ matrix_parse_parallel :: proc(imp: ^Importer, data: []byte, body: int, threads: 
 // read_matrix_line parses one `left right cost` triple and writes it
 // into the matrix.
 read_matrix_line :: proc(imp: ^Importer, line: []byte, seen: []u8) -> (bool, Load_Err) {
-	idx, cost, perr := parse_matrix_triple(line, imp.conn_matrix.n_left, imp.conn_matrix.n_right, &imp.fields_buf)
+	idx, cost, perr := parse_matrix_triple(line, imp.conn_matrix.n_left, imp.conn_matrix.n_right)
 	if perr != nil { return false, perr }
 	imp.conn_matrix.costs[idx] = cost
 	added := !bitset_has(seen, idx)
@@ -1148,15 +1206,30 @@ read_matrix_line :: proc(imp: ^Importer, line: []byte, seen: []u8) -> (bool, Loa
 }
 
 // parse_matrix_triple is the single line-parse definition shared by
-// the serial scan and the parallel workers (split into the caller's
-// field buffer), so the two paths can never drift on what a line
-// means.
-parse_matrix_triple :: proc(line: []byte, n_left: int, n_right: int, fields_buf: ^[dynamic]string) -> (int, i16, Load_Err) {
-	fields, werr := split_whitespace(string(line), fields_buf)
-	if werr != nil { return 0, 0, werr }
-	if len(fields) < 3 { return 0, 0, .Invalid_Format }
-	left, lok := strconv.parse_int(fields[0])
-	right, rok := strconv.parse_int(fields[1])
+// the serial scan and the parallel workers: one byte pass locates the
+// first three whitespace-separated fields and parses them where they
+// lie - the matrix body is tens of millions of lines, and staging
+// every line through a split buffer was the import's next-largest
+// instruction block after the numeric parse itself. Extra fields
+// beyond the third are ignored (the split-based parse read only the
+// first three); fewer than three, or a non-numeric or out-of-range
+// column, answers .Invalid_Format.
+parse_matrix_triple :: proc(line: []byte, n_left: int, n_right: int) -> (int, i16, Load_Err) {
+	fields: [3]string
+	found := 0
+	i := 0
+	n := len(line)
+	for found < 3 {
+		for i < n && (line[i] == ' ' || line[i] == '\t') { i += 1 }
+		if i >= n { break }
+		start := i
+		for i < n && line[i] != ' ' && line[i] != '\t' { i += 1 }
+		fields[found] = string(line[start:i])
+		found += 1
+	}
+	if found < 3 { return 0, 0, .Invalid_Format }
+	left, lok := parse_decimal(fields[0])
+	right, rok := parse_decimal(fields[1])
 	if !lok || !rok { return 0, 0, .Invalid_Format }
 	if left < 0 || left >= n_left { return 0, 0, .Invalid_Format }
 	if right < 0 || right >= n_right { return 0, 0, .Invalid_Format }
@@ -1236,9 +1309,9 @@ read_char_def_line :: proc(ranges: ^[dynamic]Char_Range, line: []byte, fields_bu
 		}
 	} else if len(fields) >= 4 {
 		// Category definition "NAME INVOKE GROUP LENGTH".
-		iv, i1 := strconv.parse_int(fields[1])
-		gv, i2 := strconv.parse_int(fields[2])
-		lv, i3 := strconv.parse_int(fields[3])
+		iv, i1 := parse_decimal(fields[1])
+		gv, i2 := parse_decimal(fields[2])
+		lv, i3 := parse_decimal(fields[3])
 		if i1 && i2 && i3 {
 			if fields[0] == "DEFAULT" {
 				// DEFAULT is the class of characters no range covers;
@@ -1328,11 +1401,40 @@ parse_codepoint :: proc(s: string) -> (int, bool) {
 	return v, true
 }
 
+// parse_decimal is the integer parse for MeCab numeric columns: plain
+// decimal with an optional sign. The core strconv.parse_int general
+// path (prefixes, radix selection) is paid per CSV and matrix.def
+// column, and matrix.def alone carries tens of millions of columns -
+// a digits-only loop is the import's largest single instruction
+// saving. A value that cannot stay inside i64 saturates to the i64
+// ends (the callers' range checks and the i16 saturation own the
+// decisions); anything non-numeric answers false.
+parse_decimal :: proc(s: string) -> (int, bool) {
+	n := len(s)
+	if n == 0 { return 0, false }
+	neg := false
+	i := 0
+	if s[0] == '-' { neg = true; i = 1 }
+	else if s[0] == '+' { i = 1 }
+	if i >= n { return 0, false }
+	// (max(i64) - 9) / 10: v at or under it keeps v*10 + 9 inside i64.
+	limit: int = 922337203685477579
+	v: int = 0
+	for i < n {
+		c := s[i]
+		if c < '0' || c > '9' { return 0, false }
+		if v > limit { return min(int) if neg else max(int), true }
+		v = v * 10 + int(c - '0')
+		i += 1
+	}
+	return -v if neg else v, true
+}
+
 // parse_i16_saturating parses an integer and saturates it into i16:
 // values beyond the range clamp to the range ends, preserving
 // ordering. ok is false when the text is not numeric at all.
 parse_i16_saturating :: proc(s: string) -> (i16, bool) {
-	v, ok := strconv.parse_int(s)
+	v, ok := parse_decimal(s)
 	if !ok { return 0, false }
 	max16 := int(max(i16))
 	min16 := int(min(i16))
