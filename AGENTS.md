@@ -95,7 +95,11 @@ just sdk-test    # SDK build, shim ABI tests under the same gate, pytest
 ```
 
 - Prefer the just recipes over raw odin invocations — they pin the
-  working directory, the thread count, and the log paths.
+  working directory, the thread count, the log paths, and the
+  optimization flag: `odin build`/`odin run` default to minimal
+  optimization, where timing collapses by an order of magnitude while
+  every correctness gate stays green (a suspiciously small binary is
+  the tell), so a raw timing invocation must pass `-o:speed` itself.
 - **Verdicts come from the log, never the exit status alone**: grep
   the suite log with
   `grep -a -E '\[ERROR\]|\[FATAL\]|\[WARN \]|\[WARN\]|\+\+\+ leak|bad free|out of range'`.
@@ -361,6 +365,17 @@ are probe-verified gone on dev-2026-09 and kept as history.
 - Odin `int` is pointer-sized (64-bit on x86_64):
   `cast(int)(uintptr(p))` is a lossless bit conversion, not a C-style
   32-bit truncation.
+- Binary XOR is `~` (`^` is only the pointer-type prefix and the
+  dereference postfix; `a ^ b` does not parse as arithmetic).
+- The wrapping operators `+%`/`-%` are not parsed on this toolchain
+  ("Expected an operand"). Unsigned runtime arithmetic already wraps;
+  what must be avoided is constant folding overflow — receive into a
+  typed local before the operation.
+- Map element removal is `delete_key(&m, k)` — a two-argument
+  `delete(m, k)` does not exist (`delete` takes the whole collection).
+- An untyped float literal with an integer value (`1e18`) infers `int`
+  through `:=` while `1.5` infers `f64` — spell the type on float
+  sentinels (`best: f64 = 1e18`).
 
 ## SDK C-side rules (paid-for landmines — keep them)
 

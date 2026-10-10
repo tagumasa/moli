@@ -108,6 +108,10 @@ build_test_analyzer :: proc(t: ^testing.T, lang: moli.Language, mode: moli.Mode,
 	mem.dynamic_arena_init(&arena)
 	defer mem.dynamic_arena_destroy(&arena)
 
+	// The hand-assembled rows go through the load's final pass: the
+	// alias bits are what lets a save reuse an equal field's ref.
+	moli.entries_set_alias(&a)
+
 	builder: moli.Cedar_Builder
 	builder.cedar = &a.cedar
 	builder.allocator = allocator
