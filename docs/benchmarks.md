@@ -172,27 +172,34 @@ read-only mapping. The comparison that matters is each host's restore
 against its own load table above.*
 
 `qdct_mmap_bench.odin` (medians, n=3; `save` from a one-off probe —
-the harness builds its snapshot untimed):
+the harness builds its snapshot untimed). x86 cells 2026-10-10; ARM
+cells 2026-10-07, measured on that tree's larger images (re-stamp at
+the next ARM sync):
 
 | Dictionary | save (x86) | copy restore (x86) | copy restore (ARM) | mapped restore (x86) | mapped restore (ARM) | File size |
 |---|---|---|---|---|---|---|
-| ipadic 2.7.0 | 0.15s | ~0.099s | 0.089s | ~0.064s | 0.061s | 64 MiB |
-| unidic 2.1.2 | 0.46s | ~0.313s | 0.189s | ~0.198s | 0.102s | 212 MiB |
-| mecab-jieba 0.1.1 | 0.14s | ~0.166s | 0.102s | ~0.112s | 0.057s | 95 MiB |
+| ipadic 2.7.0 | 0.089s | 0.091s | 0.089s | 0.063s | 0.061s | 49 MiB |
+| unidic 2.1.2 | 0.302s | 0.295s | 0.189s | 0.197s | 0.102s | 179 MiB |
+| mecab-jieba 0.1.1 | 0.076s | 0.162s | 0.102s | 0.112s | 0.057s | 88 MiB |
 
 - **What the mapping saves.** `load_qdct_mmap` (POSIX; Windows falls
   back to the read copy) drops the whole-file read copy: the restore
-  falls to ~62–69% of the copy on x86, and to 0.69× / 0.54× / 0.56×
-  (ipadic/unidic/jieba) on ARM. Only the rebuild's allocations remain.
-- **Resident set.** x86: a mapped restore ends at the copy's VmRSS
-  (+115/+379/+171 MiB), and a smoke tokenize faults in only 8 kB more
-  — the restore stamps the entries fingerprint with one walk over
-  every entry string (src/moli/qdct.odin's restore tail), and that walk
-  faults the mapped payload. ARM: +115/+212 MiB (ipadic/unidic),
-  +76 MiB copy / +95 MiB mmap (jieba).
+  falls to ~0.67–0.69× of the copy on x86, and to 0.69× / 0.54× /
+  0.56× (ipadic/unidic/jieba) on ARM. Only the rebuild's allocations
+  remain.
+- **Resident set.** x86 after load: copy +100/+345/+164 MiB
+  (ipadic/unidic/jieba), mapped +100/+345/+164 MiB — the mapping's
+  resident set includes the faulted file pages. A smoke tokenize
+  faults in only a few kB more — the restore stamps the entries
+  fingerprint with one walk over every entry string (src/moli/qdct.odin's
+  restore tail), and that walk faults the mapped payload. ARM
+  (2026-10-07 images): +115/+212 MiB (ipadic/unidic), +76 MiB copy /
+  +95 MiB mmap (jieba).
 - **Identity.** Restores are morpheme-identical to the CSV import.
   `load_qdct_bytes` adopts the caller's buffer for the same restore
-  without touching the filesystem. Snapshot bytes and fingerprint
+  without touching the filesystem. A re-save of a restored analyzer is
+  byte-identical to the original save; the suite's roundtrip tests pin
+  it, empty fields included. Snapshot bytes and fingerprint
   values are contract-internal: content equality implies them within a
   build, and they never compare across layouts.
 

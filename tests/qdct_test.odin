@@ -144,6 +144,159 @@ qdct_roundtrip_test :: proc(t: ^testing.T) {
 	}
 }
 
+// The blob section stores a repeated value once through its exact
+// dedup paths: a field named by an alias bit (an equality its load
+// recorded) reuses that field's ref, and the importer's canonical
+// joined-POS allocations share one ref across entries. The restore
+// answers identically.
+@(test)
+qdct_blob_dedup_test :: proc(t: ^testing.T) {
+	entries := []Test_Entry{
+		{surface = "犬", left_id = 0, right_id = 0, cost = 100, pos = "名詞,一般"},
+		{surface = "猫", left_id = 0, right_id = 0, cost = 100, pos = "名詞,一般"},
+		{surface = "歩く", left_id = 0, right_id = 0, cost = 200, pos = "動詞,自立"},
+	}
+	a, ok := build_test_analyzer(t, .Japanese, .Viterbi, entries, nil, 0)
+	if !ok { return }
+	defer moli.free(&a)
+
+	image, serr := moli.snapshot(&a, context.allocator)
+	if serr != nil {
+		testing.expectf(t, false, "snapshot: %v", serr)
+		return
+	}
+	// Ownership transfers: the restored analyzer's free releases the image.
+	b, rerr := moli.load_qdct_bytes(image, context.allocator)
+	if rerr != nil {
+		testing.expectf(t, false, "restore: %v", rerr)
+		return
+	}
+	defer moli.free(&b)
+	if !expect_analyses_equal(t, &a, &b, []string{"犬", "猫", "歩く"}) { return }
+
+	// build_test_analyzer clones lemma from the surface and both
+	// readings from "*": entries_set_alias recorded both equalities, so
+	// within one entry the equal fields share the ref.
+	records := qdct_entry_records(t, image, len(a.entries))
+	for rec, i in records {
+		testing.expectf(t, rec.lemma == rec.surface && rec.reading == rec.reading_jyutping,
+			"entry %v: within-entry equal fields must share refs", i)
+		if rec.lemma != rec.surface || rec.reading != rec.reading_jyutping { return }
+	}
+
+	// The dedup the image exists for: the blob undercuts the
+	// serialized fields' byte total (five fields per entry plus the
+	// fallback POS).
+	blob_tbl := moli.QDCT_HEADER_SIZE + int(moli.QDCT_SECTION_BLOB) * moli.QDCT_SECTION_ENTRY_SIZE
+	blob_len := int(moli.le_u64(image, blob_tbl + 8))
+	total := len(a.unknown_fallback_pos)
+	for e in a.entries {
+		total += len(e.surface) + len(e.joined_pos) + len(e.lemma) +
+			len(e.reading) + len(e.reading_jyutping)
+	}
+	testing.expectf(t, blob_len < total,
+		"blob must be deduplicated: %v vs %v bytes", blob_len, total)
+
+	// The importer's interned joined POS: rows carrying the same POS
+	// value share one ref across entries. The surface sort reorders
+	// rows, so the pair check stays order-agnostic.
+	fa, fok := load_ok(t, .Japanese, IPADIC_FIXTURE, {})
+	if !fok { return }
+	defer moli.free(&fa)
+	fimage, fserr := moli.snapshot(&fa, context.allocator)
+	if fserr != nil {
+		testing.expectf(t, false, "fixture snapshot: %v", fserr)
+		return
+	}
+	frecords := qdct_entry_records(t, fimage, len(fa.entries))
+	shared := false
+	for i in 0 ..< len(frecords) {
+		for j in i + 1 ..< len(frecords) {
+			if frecords[i].joined_pos == frecords[j].joined_pos { shared = true }
+		}
+	}
+	delete(fimage, context.allocator)
+	testing.expectf(t, shared, "fixture rows sharing a POS value must share its ref")
+}
+
+// qdct_entry_records reads the entries section's records out of an
+// image - the tests' window into the serialized refs.
+qdct_entry_records :: proc(t: ^testing.T, image: []u8, n: int) -> []moli.Entry_Record {
+	tbl := moli.QDCT_HEADER_SIZE + int(moli.QDCT_SECTION_ENTRIES) * moli.QDCT_SECTION_ENTRY_SIZE
+	off := int(moli.le_u64(image, tbl))
+	return mem.slice_data_cast([]moli.Entry_Record,
+		image[off:off + n * size_of(moli.Entry_Record)])
+}
+
+// A dictionary may carry empty string fields. Every empty must
+// resolve to the zero ref on both the imported and the restored pass:
+// an empty string has no bytes to key by, so keying it in the pointer
+// table aliases every empty onto the first one's ref on the restored
+// pass alone, and a re-save after restore stops being byte-identical.
+// The committed fixtures carry no empty fields, so the population is
+// constructed here.
+@(test)
+qdct_empty_field_roundtrip_test :: proc(t: ^testing.T) {
+	entries := []Test_Entry{
+		{surface = "読み", left_id = 0, right_id = 0, cost = 100, pos = "名詞,一般"},
+		{surface = "空欄", left_id = 0, right_id = 0, cost = 100, pos = "名詞,一般"},
+	}
+	a, ok := build_test_analyzer(t, .Japanese, .Viterbi, entries, nil, 0)
+	if !ok { return }
+	defer moli.free(&a)
+
+	// Empty the first row's reading (released first - the row's clone
+	// is owned), then re-run the load's final pass: alias bits are
+	// facts of the field values, so an assembly mutation goes through
+	// entries_set_alias or the bits go stale.
+	delete(a.entries[0].reading, context.allocator)
+	a.entries[0].reading = ""
+	moli.entries_set_alias(&a)
+
+	image, serr := moli.snapshot(&a, context.allocator)
+	if serr != nil {
+		testing.expectf(t, false, "snapshot: %v", serr)
+		return
+	}
+	records := qdct_entry_records(t, image, len(a.entries))
+	zero: moli.Str_Ref
+	if records[0].reading != zero || records[1].reading == zero {
+		testing.expectf(t, false, "empty reading must take the zero ref: %v vs %v",
+			records[0].reading, records[1].reading)
+		return
+	}
+	// Ownership transfers: the restored analyzer's free releases the image.
+	b, rerr := moli.load_qdct_bytes(image, context.allocator)
+	if rerr != nil {
+		testing.expectf(t, false, "restore: %v", rerr)
+		return
+	}
+	defer moli.free(&b)
+
+	if werr := moli.save_qdct(&a, "tmp/qdct_e1.bin", context.allocator); werr != nil {
+		testing.expectf(t, false, "save: %v", werr)
+		return
+	}
+	if werr := moli.save_qdct(&b, "tmp/qdct_e2.bin", context.allocator); werr != nil {
+		testing.expectf(t, false, "re-save: %v", werr)
+		return
+	}
+	f1, rerr1 := os.read_entire_file("tmp/qdct_e1.bin", context.temp_allocator)
+	f2, rerr2 := os.read_entire_file("tmp/qdct_e2.bin", context.temp_allocator)
+	if rerr1 != nil || rerr2 != nil {
+		testing.expectf(t, false, "re-read: %v / %v", rerr1, rerr2)
+		return
+	}
+	same := len(f1) == len(f2)
+	if same {
+		for i in 0 ..< len(f1) {
+			if f1[i] != f2[i] { same = false; break }
+		}
+	}
+	testing.expectf(t, same, "re-save after restore must be byte-identical (%v vs %v B)",
+		len(f1), len(f2))
+}
+
 @(test)
 qdct_flat_roundtrip_test :: proc(t: ^testing.T) {
 	allocator := context.allocator
@@ -338,9 +491,9 @@ qdct_save_write_error_test :: proc(t: ^testing.T) {
 
 // The save boundary's allocation leg: a starved budget allocator must
 // fail the image build as Save_Fault.OutOfMemory on both the snapshot
-// and save_qdct paths - and a budget that covers the single image
-// allocation must succeed, so the fault cannot come from anywhere but
-// the build.
+// and save_qdct paths - and some budget of the sweep must let the
+// build succeed, so the faults cannot come from anywhere but the
+// build.
 @(test)
 qdct_save_oom_test :: proc(t: ^testing.T) {
 	a, ok := load_ok(t, .Japanese, RESOURCES_FIXTURE, {})
@@ -355,14 +508,24 @@ qdct_save_oom_test :: proc(t: ^testing.T) {
 	err = moli.save_qdct(&a, "tmp/qdct_oom_save.bin", budget0)
 	if !expect_save_fault(t, "save_qdct under a zero budget", err, .OutOfMemory) { return }
 
-	b1 := Budget_Allocator{backing = context.allocator, remaining = 1}
-	budget1 := mem.Allocator{data = &b1, procedure = budget_allocator_proc}
-	image, serr := moli.snapshot(&a, budget1)
-	if serr != nil {
-		testing.expectf(t, false, "snapshot under budget 1: %v", serr)
-		return
+	// The pointer table, the build buffer, and the exact-size copy are
+	// the snapshot path's fresh allocations; sweep the budget until it
+	// covers them all. Every starved point must answer .OutOfMemory,
+	// and some budget must succeed, so the faults cannot come from
+	// anywhere but the build.
+	loaded := false
+	for budget in 1 ..< 16 {
+		b := Budget_Allocator{backing = context.allocator, remaining = budget}
+		budget_alloc := mem.Allocator{data = &b, procedure = budget_allocator_proc}
+		image, serr := moli.snapshot(&a, budget_alloc)
+		if serr == nil {
+			delete(image, budget_alloc)
+			loaded = true
+			break
+		}
+		if !expect_save_fault(t, "snapshot budget sweep", serr, .OutOfMemory) { return }
 	}
-	delete(image, budget1)
+	testing.expectf(t, loaded, "some budget must let the snapshot build succeed")
 }
 
 // qdct_expect_reject writes data out and asserts load_qdct refuses it;

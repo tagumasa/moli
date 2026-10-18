@@ -402,6 +402,7 @@ load_from :: proc(lang: Language, src: Csv_Source, opts: Load_Options, allocator
 	// already been handed over to a (their allocator is the analyzer
 	// allocator).
 	mem.dynamic_arena_destroy(&imp.scratch)
+	entries_set_alias(&a)
 	a.entries_hash = entries_fingerprint(&a)
 
 	return a, nil

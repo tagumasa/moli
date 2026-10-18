@@ -42,7 +42,10 @@ QDCT_SECTION_ENTRY_SIZE :: 16 // (offset u64, length u64) per section
 // zero-sized section. The QDCT_SECTION_* constants below are the
 // members' wire names - typed aliases, so switch cases, section-table
 // indexing, and the tests' geometry arithmetic (through int()) share
-// one vocabulary.
+// one vocabulary. A member's ordinal fixes its table slot, not its
+// position in the file: the reader walks the table, and the writer
+// places BLOB last (the only section whose length is unknown before
+// the entries walk).
 Qdct_Section :: enum {
 	BASE,
 	CHECK,
@@ -251,23 +254,42 @@ Char_Flags_Record :: struct {
 // image is built in the allocator and released before returning; the
 // analyzer is not modified.
 save_qdct :: proc(a: ^Analyzer, path: string, allocator: mem.Allocator) -> Save_Err {
-	image, err := qdct_image(a, allocator)
+	image, used, err := qdct_image(a, allocator)
 	if err != nil { return err }
 	defer delete(image, allocator)
 
-	if werr := os.write_entire_file(path, image); werr != nil {
+	if werr := os.write_entire_file(path, image[:used]); werr != nil {
 		return .IO_Write
 	}
 	return nil
 }
 
 // qdct_image serializes the analyzer into one .qdct image allocated
-// with the allocator; ownership of the bytes passes to the caller. The state
-// read runs under the acquire/release teardown contract (a concurrent
-// free cannot race it), and the source analyzer is untouched.
-// save_qdct, snapshot, and clone share this one builder.
-qdct_image :: proc(a: ^Analyzer, allocator: mem.Allocator) -> ([]u8, Save_Err) {
-	if !acquire(a) { return nil, .Unavailable }
+// with the allocator. Ownership of the whole buffer passes to the
+// caller; used answers the image's exact length — the buffer is sized
+// at the blob's undeduplicated bound, deduplication shrinks the blob
+// from the end, and everything past used is slack. save_qdct writes
+// image[:used]; snapshot copies the exact prefix out. The state read
+// runs under the acquire/release teardown contract (a concurrent free
+// cannot race it), and the source analyzer is untouched. save_qdct,
+// snapshot, and clone share this one builder.
+//
+// The write pass is single: sections stream into the image at their
+// table-declared offsets while the blob section, placed last (the
+// only section whose length is unknown before the walk), grows from
+// blob_start. A repeated string value is written once through exact
+// paths: fields marked in the entry's interned mask share one
+// canonical allocation, so a pointer-keyed lookup answers their ref; a
+// field named by an alias bit reuses the aliased field's ref (the
+// equality is a recorded fact of the load, not something the writer
+// re-derives); an extra equal to one of its entry's five fields reuses
+// that field's ref. Other repeats are written again — the values that
+// repeat across entries without sharing an allocation (surfaces,
+// high-cardinality lemmas and readings) cost more to look up than
+// their bytes cost to write. The loader is indifferent to the blob's
+// layout: a Str_Ref is a view into whatever bytes sit at (off, len).
+qdct_image :: proc(a: ^Analyzer, allocator: mem.Allocator) -> ([]u8, int, Save_Err) {
+	if !acquire(a) { return nil, 0, .Unavailable }
 	defer release(a)
 
 	n_entries := len(a.entries)
@@ -280,18 +302,19 @@ qdct_image :: proc(a: ^Analyzer, allocator: mem.Allocator) -> ([]u8, Save_Err) {
 	n_right := a.conn_matrix.n_right
 	n_cedar := len(a.cedar.base)
 
+	// The len-only walk bounds the blob at its undeduplicated size, so
+	// the write pass never grows the buffer.
 	n_extras := 0
-	blob_len := 0
-	for e in a.entries {
-		blob_len += len(e.surface) + len(e.joined_pos) + len(e.lemma) +
-			len(e.reading) + len(e.reading_jyutping)
+	blob_bound := 0
+	for &e in a.entries {
+		for s in entry_string_fields(&e) { blob_bound += len(s) }
 		n_extras += len(e.extra)
-		for s in e.extra { blob_len += len(s) }
+		for s in e.extra { blob_bound += len(s) }
 	}
-	for r in a.unk_def { blob_len += len(r.joined_pos) }
-	for p in a.unk_patterns { blob_len += len(p.pat) + len(p.joined_pos) }
-	for s in a.skipped_resources { blob_len += len(s) }
-	blob_len += len(a.unknown_fallback_pos)
+	for r in a.unk_def { blob_bound += len(r.joined_pos) }
+	for p in a.unk_patterns { blob_bound += len(p.pat) + len(p.joined_pos) }
+	for s in a.skipped_resources { blob_bound += len(s) }
+	blob_bound += len(a.unknown_fallback_pos)
 
 	counts := Qdct_Counts{
 		n_cedar    = n_cedar,
@@ -304,25 +327,42 @@ qdct_image :: proc(a: ^Analyzer, allocator: mem.Allocator) -> ([]u8, Save_Err) {
 		n_left     = n_left,
 		n_right    = n_right,
 		n_skipped  = n_skipped,
-		blob_len   = blob_len,
+		blob_len   = blob_bound,
 	}
-	if lerr := qdct_counts_limit_err(a, &counts); lerr != nil { return nil, lerr }
+	if lerr := qdct_counts_limit_err(a, &counts); lerr != nil { return nil, 0, lerr }
+
+	// Section geometry. Every member but BLOB keeps its ordinal
+	// position; BLOB is written last so its walk-determined length
+	// shifts nothing - every other offset depends only on counts.
 	sizes := [QDCT_SECTION_COUNT]int{}
+	offsets := [QDCT_SECTION_COUNT]int{}
+	total := QDCT_HEADER_SIZE + QDCT_SECTION_TABLE_SIZE
 	for i in 0 ..< QDCT_SECTION_COUNT {
 		sizes[i] = qdct_section_size(&counts, Qdct_Section(i))
-	}
-
-	total := QDCT_HEADER_SIZE + QDCT_SECTION_TABLE_SIZE
-	offsets := [QDCT_SECTION_COUNT]int{}
-	for i in 0 ..< QDCT_SECTION_COUNT {
+		if Qdct_Section(i) == QDCT_SECTION_BLOB { continue }
 		offsets[i] = total
 		total += align8(sizes[i])
 	}
+	offsets[QDCT_SECTION_BLOB] = total
+	blob_start := total
 
-	image, merr := make([]u8, total, allocator)
-	if merr != nil { return nil, .OutOfMemory }
+	image, merr := make([]u8, blob_start + blob_bound, allocator)
+	if merr != nil { return nil, 0, .OutOfMemory }
+
+	// Pointer table for the canonical fields: data pointer -> blob
+	// ref. Open-addressed with linear probing; a growth allocation
+	// that fails answers .OutOfMemory through the field resolution.
+	pt := Ptr_Table{allocator = allocator, mask = 4095}
+	pt_slots, pmerr := make([]Ptr_Slot, 4096, allocator)
+	if pmerr != nil {
+		delete(image, allocator)
+		return nil, 0, .OutOfMemory
+	}
+	pt.slots = pt_slots
+	defer delete(pt.slots, allocator)
 
 	w := Writer{buf = image}
+	blob := Blob_Sink{start = blob_start}
 	// Header.
 	magic := "QDCT"
 	w_bytes(&w, transmute([]u8)magic)
@@ -345,12 +385,6 @@ qdct_image :: proc(a: ^Analyzer, allocator: mem.Allocator) -> ([]u8, Save_Err) {
 	// header offset: this pins the writer's field order to the reader's
 	// QDCT_OFF_* vocabulary.
 	assert(w.pos == QDCT_OFF_PATTERNS + size_of(u32))
-	skip_to(&w, QDCT_HEADER_SIZE)
-	// Section table.
-	for i in 0 ..< QDCT_SECTION_COUNT {
-		w_u64(&w, u64(offsets[i]))
-		w_u64(&w, u64(sizes[i]))
-	}
 	skip_to(&w, QDCT_HEADER_SIZE + QDCT_SECTION_TABLE_SIZE)
 
 	// Cedar arrays. Every section is written at its table-declared
@@ -367,28 +401,63 @@ qdct_image :: proc(a: ^Analyzer, allocator: mem.Allocator) -> ([]u8, Save_Err) {
 	w_bytes(&w, mem.slice_to_bytes(a.cedar.group_count[:]))
 	skip_to(&w, offsets[QDCT_SECTION_ENTRIES])
 
-	// Entries + extras + blob: records stream sequentially while their
-	// strings land in the blob region and the extra refs in theirs.
+	// Entries + extras: records stream sequentially while their string
+	// fields resolve through the dedup paths and the extra refs land
+	// in their own section.
 	extras_pos := offsets[QDCT_SECTION_EXTRAS]
-	blob_pos := offsets[QDCT_SECTION_BLOB]
-	blob_cur := blob_pos
 	extra_idx := 0
-	ref: Str_Ref
-	for e in a.entries {
-		rec := Entry_Record{
-			left_id  = e.left_id,
-			right_id = e.right_id,
-			cost     = e.cost,
+	for &e in a.entries {
+		ss := entry_string_fields(&e)
+		refs: [5]Str_Ref
+		// A restored row's strings are views into one image: equal
+		// values share an offset (a pointer hit is a value hit) and an
+		// offset is never shared by different values. Deduping those
+		// rows by pointer on every field is what makes a re-save of a
+		// restored analyzer reproduce the image byte for byte. An
+		// imported row instead resolves its alias bits - equalities its
+		// own load recorded - so a field with nothing to reuse appends
+		// with no lookup at all.
+		restored := !e.strings_owned
+		for s, f in ss {
+			canonical := restored || (f > 0 && e.interned & u8(1 << u8(f-1)) != 0)
+			alias_g := -1
+			if f == 2 {
+				if e.alias & ALIAS_LEMMA_SURFACE != 0 { alias_g = 0 }
+			} else if f == 3 {
+				if e.alias & ALIAS_READING_SURFACE != 0 {
+					alias_g = 0
+				} else if e.alias & ALIAS_READING_LEMMA != 0 {
+					alias_g = 2
+				}
+			} else if f == 4 {
+				if e.alias & ALIAS_JYUTPING_READING != 0 { alias_g = 3 }
+			}
+			ref, ok := resolve_str(&pt, &w, &blob, s, canonical,
+				alias_g >= 0, alias_g >= 0 ? refs[alias_g] : Str_Ref{})
+			if !ok { return nil, 0, .OutOfMemory }
+			refs[f] = ref
 		}
-		rec.surface, blob_cur = put_str(&w, e.surface, blob_pos, blob_cur)
-		rec.joined_pos, blob_cur = put_str(&w, e.joined_pos, blob_pos, blob_cur)
-		rec.lemma, blob_cur = put_str(&w, e.lemma, blob_pos, blob_cur)
-		rec.reading, blob_cur = put_str(&w, e.reading, blob_pos, blob_cur)
-		rec.reading_jyutping, blob_cur = put_str(&w, e.reading_jyutping, blob_pos, blob_cur)
+		rec := Entry_Record{
+			surface          = refs[0],
+			joined_pos       = refs[1],
+			lemma            = refs[2],
+			reading          = refs[3],
+			reading_jyutping = refs[4],
+			left_id          = e.left_id,
+			right_id         = e.right_id,
+			cost             = e.cost,
+		}
 		rec.extra_count = u16(len(e.extra))
 		rec.extra_first = u32(extra_idx)
 		for s in e.extra {
-			ref, blob_cur = put_str(&w, s, blob_pos, blob_cur)
+			ref, hit := Str_Ref{}, false
+			for g in 0 ..< 5 {
+				if ss[g] == s {
+					ref, hit = refs[g], true
+					break
+				}
+			}
+			if !hit { ref = blob_append(&w, &blob, s) }
 			write_ref_at(&w, extras_pos, ref)
 			extras_pos += size_of(Str_Ref)
 			extra_idx += 1
@@ -405,7 +474,7 @@ qdct_image :: proc(a: ^Analyzer, allocator: mem.Allocator) -> ([]u8, Save_Err) {
 			right_id = r.right_id,
 			cost    = r.cost,
 		}
-		rec.joined_pos, blob_cur = put_str(&w, r.joined_pos, blob_pos, blob_cur)
+		rec.joined_pos = blob_append(&w, &blob, r.joined_pos)
 		w_bytes(&w, mem.ptr_to_bytes(&rec))
 	}
 	skip_to(&w, offsets[QDCT_SECTION_RANGES])
@@ -426,14 +495,12 @@ qdct_image :: proc(a: ^Analyzer, allocator: mem.Allocator) -> ([]u8, Save_Err) {
 
 	skipped_pos := offsets[QDCT_SECTION_SKIPPED]
 	for s in a.skipped_resources {
-		ref, blob_cur = put_str(&w, s, blob_pos, blob_cur)
-		write_ref_at(&w, skipped_pos, ref)
+		write_ref_at(&w, skipped_pos, blob_append(&w, &blob, s))
 		skipped_pos += size_of(Str_Ref)
 	}
 	skip_to(&w, offsets[QDCT_SECTION_FALLBACK])
 
-	ref, blob_cur = put_str(&w, a.unknown_fallback_pos, blob_pos, blob_cur)
-	write_ref_at(&w, offsets[QDCT_SECTION_FALLBACK], ref)
+	write_ref_at(&w, offsets[QDCT_SECTION_FALLBACK], blob_append(&w, &blob, a.unknown_fallback_pos))
 	skip_to(&w, offsets[QDCT_SECTION_CHAR_FLAGS])
 
 	for i in 0 ..< len(Char_Class) {
@@ -454,21 +521,41 @@ qdct_image :: proc(a: ^Analyzer, allocator: mem.Allocator) -> ([]u8, Save_Err) {
 			right_id = p.right_id,
 			cost     = p.cost,
 		}
-		rec.pat, blob_cur = put_str(&w, p.pat, blob_pos, blob_cur)
-		rec.joined_pos, blob_cur = put_str(&w, p.joined_pos, blob_pos, blob_cur)
+		rec.pat        = blob_append(&w, &blob, p.pat)
+		rec.joined_pos = blob_append(&w, &blob, p.joined_pos)
 		w_bytes(&w, mem.ptr_to_bytes(&rec))
 	}
 
-	return image, nil
+	// The section table, written now that the blob's length is final;
+	// its region has stayed zero since the header pass skipped over it.
+	sizes[QDCT_SECTION_BLOB] = blob.cur
+	skip_to(&w, QDCT_HEADER_SIZE)
+	for i in 0 ..< QDCT_SECTION_COUNT {
+		w_u64(&w, u64(offsets[i]))
+		w_u64(&w, u64(sizes[i]))
+	}
+
+	assert(blob.cur <= blob_bound)
+	return image, blob_start + blob.cur, nil
 }
 
 // snapshot serializes the analyzer into an in-memory .qdct image -
 // byte-identical to what save_qdct writes - owned by the caller
-// (delete(image, allocator) releases it). Handing the same bytes to
-// load_qdct_bytes(image, allocator) restores an equal analyzer with the
-// image's ownership transferring to that call.
+// (delete(image, allocator) releases it). The exact-size copy exists
+// because the build buffer carries deduplication slack past its used
+// length, and a caller's delete must free the allocation it holds at
+// the length it holds it. Handing the bytes to load_qdct_bytes(image,
+// allocator) restores an equal analyzer with the image's ownership
+// transferring to that call.
 snapshot :: proc(a: ^Analyzer, allocator: mem.Allocator) -> ([]u8, Save_Err) {
-	return qdct_image(a, allocator)
+	build, used, err := qdct_image(a, allocator)
+	if err != nil { return nil, err }
+	defer delete(build, allocator)
+
+	image, merr := make([]u8, used, allocator)
+	if merr != nil { return nil, .OutOfMemory }
+	copy(image, build[:used])
+	return image, nil
 }
 
 // clone produces an independent copy of the analyzer under the allocator:
@@ -481,7 +568,7 @@ snapshot :: proc(a: ^Analyzer, allocator: mem.Allocator) -> ([]u8, Save_Err) {
 // use is variant dictionaries (clone a shared base, add_user_entries
 // into the private copy), not per-thread tokenizing copies.
 clone :: proc(a: ^Analyzer, allocator: mem.Allocator) -> (Analyzer, Save_Err) {
-	image, serr := qdct_image(a, allocator)
+	image, serr := snapshot(a, allocator)
 	if serr != nil { return Analyzer{}, serr }
 	b, berr := load_qdct_bytes(image, allocator)
 	if berr != nil {
@@ -509,16 +596,141 @@ clone :: proc(a: ^Analyzer, allocator: mem.Allocator) -> (Analyzer, Save_Err) {
 	return b, nil
 }
 
-// put_str appends s into the blob region (which starts at blob_base;
-// blob_cur is the absolute write cursor) and answers its blob-relative
-// ref plus the advanced cursor. The main section cursor is untouched.
-put_str :: proc(w: ^Writer, s: string, blob_base: int, blob_cur: int) -> (Str_Ref, int) {
-	w_room(w, blob_cur, len(s))
-	ref := Str_Ref{off = u32(blob_cur - blob_base), len = u32(len(s))}
-	if len(s) > 0 {
-		copy(w.buf[blob_cur:blob_cur + len(s)], transmute([]byte)s)
+// Blob_Sink names the blob region's placement inside the image: bytes
+// append at image[start + cur], and each append answers the ref it
+// wrote. The region was sized at the undeduplicated bound, so appends
+// never grow.
+Blob_Sink :: struct {
+	start: int,
+	cur:   int,
+}
+
+blob_append :: proc(w: ^Writer, blob: ^Blob_Sink, s: string) -> Str_Ref {
+	ref := Str_Ref{off = u32(blob.cur), len = u32(len(s))}
+	w_bytes_at(w, blob.start + blob.cur, transmute([]byte)s)
+	blob.cur += len(s)
+	return ref
+}
+
+// Ptr_Slot is one pointer-table slot. The key is the string's data
+// pointer with the top bit set - user-space pointers keep that bit
+// clear, so a live key never reads as the all-zero empty slot.
+Ptr_Slot :: struct {
+	key: uintptr,
+	ref: Str_Ref,
+}
+
+// Ptr_Table interns canonical strings by data pointer: equal pointers
+// are equal values (the importer's intern table owns one allocation
+// per distinct value; a restored analyzer's strings are views into one
+// image, where equal values share an offset and an offset is never
+// shared by different values). Open-addressed with linear probing,
+// grown by doubling at a 3/4 load - growth keeps at least a quarter of
+// the slots empty, so every probe terminates.
+Ptr_Table :: struct {
+	slots:     []Ptr_Slot,
+	mask:      u32,
+	used:      int,
+	allocator: mem.Allocator,
+}
+
+ptr_table_hash :: proc(key: uintptr) -> u32 {
+	return u32(((key >> 4) * 0x9E3779B97F4A7C15) >> 32)
+}
+
+ptr_table_get :: proc(t: ^Ptr_Table, p: uintptr) -> (Str_Ref, bool) {
+	key := p | (uintptr(1) << 63)
+	idx := ptr_table_hash(key) & t.mask
+	for {
+		slot := &t.slots[idx]
+		if slot.key == key { return slot.ref, true }
+		if slot.key == 0 { return Str_Ref{}, false }
+		idx = (idx + 1) & t.mask
 	}
-	return ref, blob_cur + len(s)
+}
+
+// ptr_table_put registers p -> ref; ok false means the growth
+// allocation failed and nothing was registered.
+ptr_table_put :: proc(t: ^Ptr_Table, p: uintptr, ref: Str_Ref) -> bool {
+	if t.used * 4 > len(t.slots) * 3 && !ptr_table_grow(t) { return false }
+	key := p | (uintptr(1) << 63)
+	idx := ptr_table_hash(key) & t.mask
+	for {
+		slot := &t.slots[idx]
+		if slot.key == key {
+			slot.ref = ref
+			return true
+		}
+		if slot.key == 0 {
+			slot^ = Ptr_Slot{key = key, ref = ref}
+			t.used += 1
+			return true
+		}
+		idx = (idx + 1) & t.mask
+	}
+}
+
+ptr_table_grow :: proc(t: ^Ptr_Table) -> bool {
+	slots_new, aerr := make([]Ptr_Slot, len(t.slots) * 2, t.allocator)
+	if aerr != nil { return false }
+	mask_new := u32(len(slots_new) - 1)
+	for slot in t.slots {
+		if slot.key == 0 { continue }
+		idx := ptr_table_hash(slot.key) & mask_new
+		for slots_new[idx].key != 0 { idx = (idx + 1) & mask_new }
+		slots_new[idx] = slot
+	}
+	delete(t.slots, t.allocator)
+	t.slots = slots_new
+	t.mask = mask_new
+	return true
+}
+
+// resolve_str answers one entry string field's blob ref. The empty
+// string resolves to the zero ref everywhere and never touches the
+// pointer table: str_ptr answers 0 for it, and keying it would alias
+// every empty field onto the first one's ref on the restored pass
+// alone - the two passes must agree field for field, or a
+// save-restore-resave is not byte-identical. A canonical field
+// consults the pointer table (an imported row's interned mask bit -
+// mask bit f-1 aligns with entry_string_fields' order, field f -
+// marks fields that borrow the importer's intern table; a restored
+// row, strings_owned false, routes every field there through the
+// image-view identity above). An aliased field reuses the aliased
+// field's ref with no comparison - its load recorded the equality as
+// an alias bit, and the analyzer is immutable after load returns, so
+// the bit still holds. The first occurrence appends. ok false means
+// the pointer table's growth allocation failed and nothing was
+// registered.
+resolve_str :: #force_inline proc(
+	pt:        ^Ptr_Table,
+	w:         ^Writer,
+	blob:      ^Blob_Sink,
+	s:         string,
+	canonical: bool,
+	alias:     bool,
+	ref_alias: Str_Ref,
+) -> (Str_Ref, bool) {
+	if len(s) == 0 { return Str_Ref{}, true }
+	if canonical {
+		if r, ok := ptr_table_get(pt, str_ptr(s)); ok { return r, true }
+	}
+	ref := ref_alias
+	if !alias {
+		ref = blob_append(w, blob, s)
+	}
+	if canonical && !ptr_table_put(pt, str_ptr(s), ref) {
+		return Str_Ref{}, false
+	}
+	return ref, true
+}
+
+// str_ptr answers the key a canonical string registers under. The
+// empty string has no bytes to point at and answers 0; every other
+// live allocation is unique, so equal keys are equal values.
+str_ptr :: proc(s: string) -> uintptr {
+	if len(s) == 0 { return 0 }
+	return uintptr(raw_data(transmute([]byte)s))
 }
 
 // write_ref_at stores one Str_Ref at an absolute position (the extras /
@@ -555,6 +767,13 @@ w_bytes :: proc(w: ^Writer, data: []byte) {
 	w_room(w, w.pos, len(data))
 	copy(w.buf[w.pos:w.pos + len(data)], data)
 	w.pos += len(data)
+}
+
+// w_bytes_at writes at an absolute position without moving the
+// cursor (the blob region, which fills out of section order).
+w_bytes_at :: proc(w: ^Writer, pos: int, data: []byte) {
+	w_room(w, pos, len(data))
+	copy(w.buf[pos:pos + len(data)], data)
 }
 
 w_u8 :: proc(w: ^Writer, v: u8) {

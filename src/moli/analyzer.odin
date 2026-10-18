@@ -166,6 +166,7 @@ Dictionary_Entry :: struct {
 	extra:            [dynamic]string,  // schema-specific tail columns
 	strings_owned:    bool,             // five string fields cloned into allocator (see above)
 	interned:         u8,               // borrowed-field mask (see above); surface never borrows
+	alias:            u8,               // within-row equality mask (see below); fits existing padding
 }
 
 // The interned mask's field bits. Surface never interns (surfaces are
@@ -179,6 +180,47 @@ INTERN_JOINED_POS       :: u8(1 << 0)
 INTERN_LEMMA            :: u8(1 << 1)
 INTERN_READING          :: u8(1 << 2)
 INTERN_READING_JYUTPING :: u8(1 << 3)
+
+// The alias mask's bits: a within-row byte equality between the named
+// field and an earlier one of entry_string_fields' order, recorded at
+// the end of a load by entries_set_alias. The qdct writer consumes a
+// bit to reuse the aliased field's blob ref without comparing bytes.
+// The bits are facts of the final field values and the analyzer is
+// immutable after load returns, so they cannot go stale; they are not
+// serialized (a restored row dedups by image-view pointer identity
+// instead, and a row merged by add_user_entries simply carries none -
+// its equal fields are written twice, which the format permits). Each
+// bit names a pair that occurs across the real dictionaries;
+// pairs with no occurrence are not encoded (the writer re-checks
+// nothing, so an unencoded equality just costs its bytes).
+ALIAS_LEMMA_SURFACE     :: u8(1 << 0)
+ALIAS_READING_SURFACE   :: u8(1 << 1)
+ALIAS_READING_LEMMA     :: u8(1 << 2)
+ALIAS_JYUTPING_READING  :: u8(1 << 3)
+
+// entries_set_alias records each row's within-row field equalities as
+// alias bits - the final pass of a load (after every rewrite pass that
+// can replace an entry string) and of any hand-assembled entry list.
+// The reading bits are exclusive in first-match order: a reading equal
+// to the surface records only ALIAS_READING_SURFACE even when it also
+// equals the lemma, mirroring the field order a reusing writer checks.
+entries_set_alias :: proc(a: ^Analyzer) {
+	for &e in a.entries {
+		mask: u8 = 0
+		if e.lemma == e.surface {
+			mask |= ALIAS_LEMMA_SURFACE
+		}
+		if e.reading == e.surface {
+			mask |= ALIAS_READING_SURFACE
+		} else if e.reading == e.lemma {
+			mask |= ALIAS_READING_LEMMA
+		}
+		if e.reading_jyutping == e.reading {
+			mask |= ALIAS_JYUTPING_READING
+		}
+		e.alias = mask
+	}
+}
 
 // entry_string_fields answers the entry's five owned string fields as
 // one array - the single statement of the field set dictionary_entry_destroy
